@@ -255,6 +255,18 @@ class hybrid_scan_reader_impl {
                     parquet_reader_options const& options);
 
   /**
+   * @brief Prepare dictionaries for dictionary page filtering.
+   *
+   * @param row_group_indices The row groups to read
+   * @param dictionary_page_data Device buffers containing dictionary page data
+   * @param options Parquet reader options
+   */
+  void prepare_dictionaries(cudf::host_span<std::vector<size_type> const> row_group_indices,
+                            cudf::host_span<rmm::device_buffer> dictionary_page_data,
+                            parquet_reader_options const& options,
+                            rmm::cuda_stream_view stream);
+
+  /**
    * @brief Preprocess step for the entire file.
    *
    * Only ever called once. This function reads in rowgroup and associated chunk

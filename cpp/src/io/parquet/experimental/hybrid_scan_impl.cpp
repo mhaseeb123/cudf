@@ -673,6 +673,19 @@ hybrid_scan_reader_impl::filter_row_groups_with_dictionary_pages(
                "Columns names in filter expression must be convertible to index references");
   auto output_dtypes = get_output_types(_output_buffers_template);
 
+  // Collect literals and operators for dictionary page filtering for each input table column
+  auto const [literals, operators] =
+    dictionary_literals_and_operators_collector{expr_conv.get_converted_expr().value().get(),
+                                                static_cast<cudf::size_type>(output_dtypes.size())}
+      .get_literals_and_operators();
+
+  // Return all row groups if no dictionary page filtering is needed
+  if (literals.empty() or operators.empty()) {
+    return std::vector<std::vector<size_type>>(row_group_indices.begin(), row_group_indices.end());
+  }
+
+  prepare_dictionaries(row_group_indices, dictionary_page_data, options, stream);
+
   return _metadata->filter_row_groups_with_dictionary_pages(dictionary_page_data,
                                                             row_group_indices,
                                                             output_dtypes,

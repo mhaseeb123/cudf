@@ -161,6 +161,7 @@ auto create_parquet_with_stats()
       .metadata(std::move(expected_metadata))
       .row_group_size_rows(5000)
       .max_page_size_rows(1000)
+      .dictionary_policy(cudf::io::dictionary_policy::ALWAYS)
       .stats_level(cudf::io::statistics_freq::STATISTICS_COLUMN);
 
   if constexpr (NumTableConcats > 1) {
@@ -422,6 +423,92 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsOnly)
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({1, 2}), read_payload_table->view());
+  }
+}
+
+TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
+{
+  srand(31337);
+
+  // A table not concated with itself with result in a parquet file with several row groups each
+  // with a single page. Since there is only one page per row group, the page and row group stats
+  // are identical and we can only prune row groups.
+  auto constexpr num_concat    = 1;
+  auto [written_table, buffer] = create_parquet_with_stats<num_concat>();
+
+  // Filtering AST - table[0] == 100
+  auto literal_value     = cudf::numeric_scalar<uint32_t>(100);
+  auto literal           = cudf::ast::literal(literal_value);
+  auto col_ref_0         = cudf::ast::column_name_reference("col_uint32");
+  auto filter_expression = cudf::ast::operation(cudf::ast::ast_operator::EQUAL, col_ref_0, literal);
+
+  auto stream = cudf::get_default_stream();
+  auto mr     = cudf::get_current_device_resource_ref();
+
+  // Create reader options with empty source info
+  cudf::io::parquet_reader_options options =
+    cudf::io::parquet_reader_options::builder(cudf::io::source_info(nullptr, 0))
+      .filter(filter_expression);
+
+  // Input file buffer span
+  auto const file_buffer_span =
+    cudf::host_span<uint8_t const>(reinterpret_cast<uint8_t const*>(buffer.data()), buffer.size());
+
+  // Fetch footer and page index bytes from the buffer.
+  auto const footer_buffer = fetch_footer_bytes(file_buffer_span);
+
+  // Create hybrid scan reader with footer bytes
+  auto const reader =
+    std::make_unique<cudf::io::parquet::experimental::hybrid_scan_reader>(footer_buffer, options);
+
+  // Get page index byte range from the reader - API # 2
+  auto const page_index_byte_range = reader->get_page_index_bytes();
+
+  // Fetch page index bytes from the input buffer
+  auto const page_index_buffer = fetch_page_index_bytes(file_buffer_span, page_index_byte_range);
+
+  // Setup page index - API # 3
+  reader->setup_page_index(page_index_buffer);
+
+  // Get all row groups from the reader - API # 4
+  auto input_row_group_indices = reader->all_row_groups(options);
+
+  // Span to track current row group indices
+  auto current_row_group_indices = cudf::host_span<cudf::size_type>(input_row_group_indices);
+
+  // Get dictionary page byte ranges from the reader - API # 6
+  auto [_, dict_page_byte_ranges] =
+    reader->secondary_filters_byte_ranges(current_row_group_indices, options);
+
+  // If we have dictionary page byte ranges, filter row groups with dictionary pages - API # 7
+  std::vector<cudf::size_type> dictionary_page_filtered_row_group_indices;
+  dictionary_page_filtered_row_group_indices.reserve(current_row_group_indices.size());
+  if (dict_page_byte_ranges.size()) {
+    // Fetch dictionary page buffers from the input file buffer
+    std::vector<rmm::device_buffer> dictionary_page_buffers =
+      fetch_byte_ranges(file_buffer_span, dict_page_byte_ranges, stream, mr);
+
+    // NOT YET IMPLEMENTED - Filter row groups with dictionary pages
+    dictionary_page_filtered_row_group_indices = reader->filter_row_groups_with_dictionary_pages(
+      dictionary_page_buffers, current_row_group_indices, options, stream);
+
+    // Update current row group indices
+    current_row_group_indices = dictionary_page_filtered_row_group_indices;
+  }
+
+  ASSERT_TRUE(false);
+
+  // Check equivalence (equal without checking nullability) with the parquet file read with the
+  // original reader
+  {
+    //  cudf::io::parquet_reader_options const options =
+    //    cudf::io::parquet_reader_options::builder(cudf::io::source_info(buffer.data(),
+    //    buffer.size()))
+    //      .filter(filter_expression);
+    //  auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
+    //  CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
+    //  CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({1, 2}),
+    //  read_payload_table->view());
   }
 }
 
