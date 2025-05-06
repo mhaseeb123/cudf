@@ -460,8 +460,7 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsOnly)
   // original reader
   {
     cudf::io::parquet_reader_options const options =
-      cudf::io::parquet_reader_options::builder(cudf::io::source_info(buffer.data(), buffer.size()))
-        .filter(filter_expression);
+      cudf::io::parquet_reader_options::builder().filter(filter_expression);
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({1, 2}), read_payload_table->view());
@@ -497,8 +496,7 @@ TEST_F(ParquetExperimentalReaderTest, TestPayloadColumns)
     CUDF_EXPECTS(read_filter_table->num_rows() == read_payload_table->num_rows(),
                  "Filter and payload tables should have the same number of rows");
     cudf::io::parquet_reader_options const options =
-      cudf::io::parquet_reader_options::builder(cudf::io::source_info(buffer.data(), buffer.size()))
-        .filter(filter_expression);
+      cudf::io::parquet_reader_options::builder().filter(filter_expression);
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({2}), read_payload_table->view());
@@ -513,8 +511,7 @@ TEST_F(ParquetExperimentalReaderTest, TestPayloadColumns)
     CUDF_EXPECTS(read_filter_table->num_rows() == read_payload_table->num_rows(),
                  "Filter and payload tables should have the same number of rows");
     cudf::io::parquet_reader_options const options =
-      cudf::io::parquet_reader_options::builder(cudf::io::source_info(buffer.data(), buffer.size()))
-        .filter(filter_expression);
+      cudf::io::parquet_reader_options::builder().filter(filter_expression);
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({2, 1}), read_payload_table->view());
@@ -552,8 +549,7 @@ TEST_F(ParquetExperimentalReaderTest, PrunePagesOnly)
   // original reader
   {
     cudf::io::parquet_reader_options const options =
-      cudf::io::parquet_reader_options::builder(cudf::io::source_info(buffer.data(), buffer.size()))
-        .filter(filter_expression);
+      cudf::io::parquet_reader_options::builder().filter(filter_expression);
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({1, 2}), read_payload_table->view());
