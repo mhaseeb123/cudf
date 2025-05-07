@@ -336,12 +336,13 @@ class hybrid_scan_reader {
     rmm::cuda_stream_view stream) const;
 
   /**
-   * @brief Fetches byte ranges of bloom filters and dictionary pages (secondary filters) for
-   * further row group pruning
+   * @brief Fetches byte ranges of available and eligible bloom filters and dictionary pages
+   *        (secondary filters) for further row group pruning
    *
    * @param row_group_indices Input row groups indices
    * @param options Parquet reader options
-   * @return Pair of vectors of byte ranges to per-column-chunk bloom filters and dictionary pages
+   * @return Pair of vectors of byte ranges of eligible column chunk bloom filters and dictionary
+   *         pages
    */
   [[nodiscard]] std::pair<std::vector<text::byte_range_info>, std::vector<text::byte_range_info>>
   secondary_filters_byte_ranges(cudf::host_span<size_type const> row_group_indices,
@@ -350,7 +351,7 @@ class hybrid_scan_reader {
   /**
    * @brief Filter the row groups with dictionary pages
    *
-   * @param dictionary_page_data Device buffers containing per-column-chunk dictionary page data
+   * @param dictionary_page_data Device buffers containing column chunk dictionary page data
    * @param row_group_indices Input row groups indices
    * @param options Parquet reader options
    * @param stream CUDA stream used for device memory operations and kernel launches
@@ -365,7 +366,7 @@ class hybrid_scan_reader {
   /**
    * @brief Filter the row groups with bloom filters
    *
-   * @param bloom_filter_data Device buffers containing per-column-chunk bloom filter data
+   * @param bloom_filter_data Device buffers containing column chunk bloom filter data
    * @param row_group_indices Input row groups indices
    * @param options Parquet reader options
    * @param stream CUDA stream used for device memory operations and kernel launches
