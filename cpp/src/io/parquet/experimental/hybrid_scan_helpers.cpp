@@ -43,11 +43,27 @@ using row_group_info                 = parquet::detail::row_group_info;
 
 namespace {
 
+// Construct a vector of all row group indices from the input vectors
 [[nodiscard]] auto all_row_group_indices(
   host_span<std::vector<cudf::size_type> const> row_group_indices)
 {
   return std::vector<std::vector<cudf::size_type>>(row_group_indices.begin(),
                                                    row_group_indices.end());
+}
+
+// Compute total number of input row groups
+[[nodiscard]] cudf::size_type compute_total_row_groups(
+  host_span<std::vector<cudf::size_type> const> row_group_indices)
+{
+  auto const total_row_groups = std::accumulate(
+    row_group_indices.begin(), row_group_indices.end(), size_t{0}, [](auto sum, auto const& pfm) {
+      return sum + pfm.size();
+    });
+
+  // Check if we have less than 2B total row groups.
+  CUDF_EXPECTS(total_row_groups <= std::numeric_limits<cudf::size_type>::max(),
+               "Total number of row groups exceed the cudf::size_type's limit");
+  return static_cast<cudf::size_type>(total_row_groups);
 }
 
 }  // namespace
@@ -305,23 +321,8 @@ std::vector<std::vector<cudf::size_type>> aggregate_reader_metadata::filter_row_
   // Return all row groups if no filter expression
   if (not filter.has_value()) { return all_row_group_indices(row_group_indices); }
 
-  // Compute total number of input row groups
-  cudf::size_type total_row_groups = [&]() {
-    if (not row_group_indices.empty()) {
-      size_t const total_row_groups =
-        std::accumulate(row_group_indices.begin(),
-                        row_group_indices.end(),
-                        size_t{0},
-                        [](auto sum, auto const& pfm) { return sum + pfm.size(); });
-
-      // Check if we have less than 2B total row groups.
-      CUDF_EXPECTS(total_row_groups <= std::numeric_limits<cudf::size_type>::max(),
-                   "Total number of row groups exceed the cudf::size_type's limit");
-      return static_cast<cudf::size_type>(total_row_groups);
-    } else {
-      return num_row_groups;
-    }
-  }();
+  // Number of input row groups
+  auto const total_row_groups = compute_total_row_groups(row_group_indices);
 
   // Filter stats table with StatsAST expression and collect filtered row group indices
   auto const stats_filtered_row_group_indices = apply_stats_filters(row_group_indices,
@@ -340,13 +341,6 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_bloom_filter_b
   host_span<int const> output_column_schemas,
   std::optional<std::reference_wrapper<ast::expression const>> filter)
 {
-  // Number of surviving row groups after applying stats filter
-  auto const total_row_groups = std::accumulate(
-    row_group_indices.begin(),
-    row_group_indices.end(),
-    cudf::size_type{0},
-    [](auto sum, auto const& per_file_row_groups) { return sum + per_file_row_groups.size(); });
-
   // Collect equality literals for each input table column
   auto const equality_literals =
     equality_literals_collector{filter.value().get(),
@@ -361,6 +355,9 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_bloom_filter_b
                   equality_literals.begin(),
                   std::back_inserter(equality_col_schemas),
                   [](auto& eq_literals) { return not eq_literals.empty(); });
+
+  // Number of input row groups
+  auto const total_row_groups = compute_total_row_groups(row_group_indices);
 
   // Descriptors for all the chunks that make up the selected columns
   auto const num_equality_columns = equality_col_schemas.size();
@@ -395,8 +392,7 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_bloom_filter_b
       });
     });
 
-  // Clear vectors if found nothing
-  if (not have_bloom_filters) { bloom_filter_bytes.clear(); }
+  if (not have_bloom_filters) { return {}; }
 
   return bloom_filter_bytes;
 }
@@ -407,13 +403,6 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_dictionary_pag
   host_span<int const> output_column_schemas,
   std::optional<std::reference_wrapper<ast::expression const>> filter)
 {
-  // Number of surviving row groups after applying stats filter
-  auto const total_row_groups = std::accumulate(
-    row_group_indices.begin(),
-    row_group_indices.end(),
-    cudf::size_type{0},
-    [](auto sum, auto const& per_file_row_groups) { return sum + per_file_row_groups.size(); });
-
   // Collect equality literals for each input table column
   auto const [literals, _] =
     dictionary_literals_and_operators_collector{filter.value().get(),
@@ -428,6 +417,9 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_dictionary_pag
                   literals.begin(),
                   std::back_inserter(dictionary_col_schemas),
                   [](auto& dict_literals) { return not dict_literals.empty(); });
+
+  // Number of input row groups
+  auto const total_row_groups = compute_total_row_groups(row_group_indices);
 
   // Descriptors for all the chunks that make up the selected columns
   auto const num_equality_columns = dictionary_col_schemas.size();
@@ -491,59 +483,33 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_dictionary_pag
       });
     });
 
-  // Clear vectors if found nothing
-  if (not have_dictionary_pages) { dictionary_page_bytes.clear(); }
+  if (not have_dictionary_pages) { return {}; }
 
   return dictionary_page_bytes;
 }
 
 std::vector<std::vector<cudf::size_type>>
 aggregate_reader_metadata::filter_row_groups_with_dictionary_pages(
-  cudf::host_span<rmm::device_buffer> dictionary_page_data,
-  host_span<std::vector<cudf::size_type> const> row_group_indices,
-  host_span<data_type const> output_dtypes,
-  host_span<int const> output_column_schemas,
+  cudf::detail::hostdevice_span<parquet::detail::ColumnChunkDesc const> chunks,
+  cudf::detail::hostdevice_span<parquet::detail::PageInfo const> pages,
+  cudf::host_span<std::vector<cudf::size_type> const> row_group_indices,
+  cudf::host_span<std::vector<ast::literal*> const> literals,
+  cudf::host_span<std::vector<ast::ast_operator> const> operators,
+  cudf::host_span<data_type const> output_dtypes,
+  cudf::host_span<int const> dictionary_col_schemas,
   std::optional<std::reference_wrapper<ast::expression const>> filter,
   rmm::cuda_stream_view stream) const
 {
-  return all_row_group_indices(row_group_indices);
-
-  // Enable when dictionary filtering is implemented
-#if 0
-  // Return all row groups if no filter expression
-  if (not filter.has_value()) { return all_row_group_indices(row_group_indices); }
-
-  // Collect literals and operators for dictionary page filtering for each input table column
-  auto const [literals, operators] =
-    dictionary_literals_and_operators_collector{filter.value().get(),
-                                                static_cast<cudf::size_type>(output_dtypes.size())}
-      .get_literals_and_operators();
-
-  // Collect schema indices of columns with equality predicate(s)
-  std::vector<cudf::size_type> dictionary_col_schemas;
-  thrust::copy_if(thrust::host,
-                  output_column_schemas.begin(),
-                  output_column_schemas.end(),
-                  literals.begin(),
-                  std::back_inserter(dictionary_col_schemas),
-                  [](auto& dict_literals) { return not dict_literals.empty(); });
-
-  // Return early if no column with equality predicate(s)
-  if (dictionary_col_schemas.empty()) { return all_row_group_indices(row_group_indices); }
-
   // Number of input row groups
-  auto const total_row_groups = std::accumulate(
-    row_group_indices.begin(),
-    row_group_indices.end(),
-    cudf::size_type{0},
-    [](auto sum, auto const& per_file_row_groups) { return sum + per_file_row_groups.size(); });
+  auto const total_row_groups = compute_total_row_groups(row_group_indices);
 
   // NYI: Decode dictionary pages into `cuco::static_set_ref`
-  auto dictionaries = materialize_dictionaries(
-    dictionary_page_data, row_group_indices, output_dtypes, dictionary_col_schemas, stream);
+  auto [hash_set_storages, hash_set_offsets] = materialize_dictionaries(
+    chunks, pages, total_row_groups, output_dtypes, dictionary_col_schemas, stream);
 
   // NYI: Filter row groups using dictionaries
-  auto const dictionary_filtered_row_groups = apply_dictionary_filter(dictionaries,
+  auto const dictionary_filtered_row_groups = apply_dictionary_filter(hash_set_storages,
+                                                                      hash_set_offsets,
                                                                       row_group_indices,
                                                                       literals,
                                                                       operators,
@@ -555,7 +521,6 @@ aggregate_reader_metadata::filter_row_groups_with_dictionary_pages(
 
   // Return all_row_group_indices as dictionary filtering not yet implemented
   return dictionary_filtered_row_groups.value_or(all_row_group_indices(row_group_indices));
-#endif
 }
 
 std::vector<std::vector<cudf::size_type>>

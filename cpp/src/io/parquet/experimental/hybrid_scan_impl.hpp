@@ -41,6 +41,8 @@
 
 namespace cudf::io::parquet::experimental::detail {
 
+using cudf::io::parquet::detail::ColumnChunkDesc;
+using cudf::io::parquet::detail::PageInfo;
 using text::byte_range_info;
 
 /**
@@ -259,12 +261,20 @@ class hybrid_scan_reader_impl {
    *
    * @param row_group_indices The row groups to read
    * @param dictionary_page_data Device buffers containing dictionary page data
+   * @param dictionary_col_schemas Schema indices of output columns with (in)equality predicate
    * @param options Parquet reader options
+   * @param stream CUDA stream
+   *
+   * @return A pair of vectors containing host device vectors of column chunk descriptors and
+   * dictionary page headers, one per column chunk with dictionary and (in)equality predicate
    */
-  void prepare_dictionaries(cudf::host_span<std::vector<size_type> const> row_group_indices,
-                            cudf::host_span<rmm::device_buffer> dictionary_page_data,
-                            parquet_reader_options const& options,
-                            rmm::cuda_stream_view stream);
+  std::pair<cudf::detail::hostdevice_vector<ColumnChunkDesc>,
+            cudf::detail::hostdevice_vector<PageInfo>>
+  prepare_dictionaries(cudf::host_span<std::vector<size_type> const> row_group_indices,
+                       cudf::host_span<rmm::device_buffer> dictionary_page_data,
+                       cudf::host_span<int const> dictionary_col_schemas,
+                       parquet_reader_options const& options,
+                       rmm::cuda_stream_view stream);
 
   /**
    * @brief Preprocess step for the entire file.

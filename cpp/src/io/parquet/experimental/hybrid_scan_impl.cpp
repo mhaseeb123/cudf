@@ -614,6 +614,7 @@ std::vector<std::vector<size_type>> hybrid_scan_reader_impl::filter_row_groups_w
   parquet_reader_options const& options,
   rmm::cuda_stream_view stream)
 {
+  CUDF_EXPECTS(not row_group_indices.empty(), "Empty input row group indices encountered");
   CUDF_EXPECTS(options.get_filter().has_value(), "Filter expression must not be empty");
 
   select_columns(read_mode::FILTER_COLUMNS, options);
@@ -637,6 +638,7 @@ hybrid_scan_reader_impl::secondary_filters_byte_ranges(
   cudf::host_span<std::vector<size_type> const> row_group_indices,
   parquet_reader_options const& options)
 {
+  CUDF_EXPECTS(not row_group_indices.empty(), "Empty input row group indices encountered");
   CUDF_EXPECTS(options.get_filter().has_value(), "Filter expression must not be empty");
 
   select_columns(read_mode::FILTER_COLUMNS, options);
@@ -663,6 +665,7 @@ hybrid_scan_reader_impl::filter_row_groups_with_dictionary_pages(
   parquet_reader_options const& options,
   rmm::cuda_stream_view stream)
 {
+  CUDF_EXPECTS(not row_group_indices.empty(), "Empty input row group indices encountered");
   CUDF_EXPECTS(options.get_filter().has_value(), "Filter expression must not be empty");
 
   select_columns(read_mode::FILTER_COLUMNS, options);
@@ -680,17 +683,34 @@ hybrid_scan_reader_impl::filter_row_groups_with_dictionary_pages(
                                                 static_cast<cudf::size_type>(output_dtypes.size())}
       .get_literals_and_operators();
 
+  CUDF_EXPECTS(literals.size() == operators.size(),
+               "Literals and operators must have the same size");
+
   // Return all row groups if no dictionary page filtering is needed
-  if (literals.empty() or operators.empty()) {
+  if (literals.empty() or std::all_of(literals.begin(), literals.end(), [](auto& col_literals) {
+        return col_literals.empty();
+      })) {
     return std::vector<std::vector<size_type>>(row_group_indices.begin(), row_group_indices.end());
   }
 
-  prepare_dictionaries(row_group_indices, dictionary_page_data, options, stream);
+  std::vector<cudf::size_type> dictionary_col_schemas;
+  thrust::copy_if(thrust::host,
+                  _output_column_schemas.begin(),
+                  _output_column_schemas.end(),
+                  literals.begin(),
+                  std::back_inserter(dictionary_col_schemas),
+                  [](auto& dict_literals) { return not dict_literals.empty(); });
 
-  return _metadata->filter_row_groups_with_dictionary_pages(dictionary_page_data,
+  auto const [chunks, pages] = prepare_dictionaries(
+    row_group_indices, dictionary_page_data, dictionary_col_schemas, options, stream);
+
+  return _metadata->filter_row_groups_with_dictionary_pages(chunks,
+                                                            pages,
                                                             row_group_indices,
+                                                            literals,
+                                                            operators,
                                                             output_dtypes,
-                                                            _output_column_schemas,
+                                                            dictionary_col_schemas,
                                                             expr_conv.get_converted_expr(),
                                                             stream);
 }
