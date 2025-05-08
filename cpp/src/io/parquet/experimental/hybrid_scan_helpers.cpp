@@ -356,6 +356,9 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_bloom_filter_b
                   std::back_inserter(equality_col_schemas),
                   [](auto& eq_literals) { return not eq_literals.empty(); });
 
+  // No equality literals found, return empty vector
+  if (equality_col_schemas.empty()) { return {}; }
+
   // Number of input row groups
   auto const total_row_groups = compute_total_row_groups(row_group_indices);
 
@@ -410,13 +413,20 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_dictionary_pag
       .get_literals_and_operators();
 
   // Collect schema indices of columns with equality predicate(s)
-  std::vector<cudf::size_type> dictionary_col_schemas;
+  std::vector<thrust::tuple<cudf::size_type, cudf::size_type>> dictionary_col_schemas;
+
+  auto iter = thrust::make_zip_iterator(
+    thrust::make_tuple(thrust::counting_iterator(0), output_column_schemas.begin()));
+
   thrust::copy_if(thrust::host,
-                  output_column_schemas.begin(),
-                  output_column_schemas.end(),
+                  iter,
+                  iter + output_column_schemas.size(),
                   literals.begin(),
                   std::back_inserter(dictionary_col_schemas),
                   [](auto& dict_literals) { return not dict_literals.empty(); });
+
+  // No (in)equality literals found, return empty vector
+  if (dictionary_col_schemas.empty()) { return {}; }
 
   // Number of input row groups
   auto const total_row_groups = compute_total_row_groups(row_group_indices);
@@ -443,9 +453,13 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_dictionary_pag
         auto const& rg = per_file_metadata[0].row_groups[rg_index];
         // For all column chunks
         std::for_each(
-          dictionary_col_schemas.begin(), dictionary_col_schemas.end(), [&](auto const schema_idx) {
+          dictionary_col_schemas.begin(),
+          dictionary_col_schemas.end(),
+          [&](auto const& schema_col_idx_pair) {
+            auto const col_idx    = thrust::get<0>(schema_col_idx_pair);
+            auto const schema_idx = thrust::get<1>(schema_col_idx_pair);
             auto& col_meta        = get_column_metadata(rg_index, src_index, schema_idx);
-            auto const& col_chunk = rg.columns[schema_idx];
+            auto const& col_chunk = rg.columns[col_idx];
 
             auto dictionary_offset = int64_t{0};
             auto dictionary_size   = int64_t{0};
@@ -501,15 +515,11 @@ aggregate_reader_metadata::filter_row_groups_with_dictionary_pages(
   rmm::cuda_stream_view stream) const
 {
   // Number of input row groups
-  auto const total_row_groups = compute_total_row_groups(row_group_indices);
-
-  // NYI: Decode dictionary pages into `cuco::static_set_ref`
-  auto [hash_set_storages, hash_set_offsets] = materialize_dictionaries(
-    chunks, pages, total_row_groups, output_dtypes, dictionary_col_schemas, stream);
+  auto const total_row_groups = static_cast<size_t>(compute_total_row_groups(row_group_indices));
 
   // NYI: Filter row groups using dictionaries
-  auto const dictionary_filtered_row_groups = apply_dictionary_filter(hash_set_storages,
-                                                                      hash_set_offsets,
+  auto const dictionary_filtered_row_groups = apply_dictionary_filter(chunks,
+                                                                      pages,
                                                                       row_group_indices,
                                                                       literals,
                                                                       operators,
@@ -532,9 +542,6 @@ aggregate_reader_metadata::filter_row_groups_with_bloom_filters(
   std::optional<std::reference_wrapper<ast::expression const>> filter,
   rmm::cuda_stream_view stream) const
 {
-  // Return all row groups if no filter expression
-  if (not filter.has_value()) { return all_row_group_indices(row_group_indices); }
-
   // Collect equality literals for each input table column
   auto const equality_literals =
     equality_literals_collector{filter.value().get(),

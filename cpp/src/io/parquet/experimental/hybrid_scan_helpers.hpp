@@ -56,50 +56,29 @@ struct metadata : private metadata_base {
 class aggregate_reader_metadata : public aggregate_reader_metadata_base {
  private:
   /**
-   * @brief Materializes column chunk dictionary pages into `cuco::static_set`s
-   *
-   * @param chunks Host device span of column chunk descriptors, one per input column chunk
-   * @param pages Host device span of decoded page headers, one per input column chunk
-   * @param total_row_groups Total number of row groups in `input_row_group_indices`
-   * @param output_dtypes Datatypes of output columns
-   * @param dictionary_col_schemas schema indices of dictionary columns only
-   * @param stream CUDA stream used for device memory operations and kernel launches
-   *
-   * @return A pair of vectors containing `cuco::static_set_ref` buffers and offsets within
-   * buffers for each column chunk's static set, one per filter column.
-   */
-  [[nodiscard]] std::pair<std::vector<rmm::device_buffer>, std::vector<std::vector<size_type>>>
-  materialize_dictionaries(
-    cudf::detail::hostdevice_span<parquet::detail::ColumnChunkDesc const> chunks,
-    cudf::detail::hostdevice_span<parquet::detail::PageInfo const> pages,
-    cudf::size_type total_row_groups,
-    host_span<data_type const> output_dtypes,
-    host_span<int const> dictionary_col_schemas,
-    rmm::cuda_stream_view stream) const;
-
-  /**
    * @brief Filters the row groups using dictionary pages
    *
-   * @param hash_set_storage Hash set device buffers for column chunk dictionaries, one per column
-   * @param hash_set_offsets Offsets within `hash_set_storage` for each column chunk, one per column
+   * @param chunks Host device span of column chunk descriptors, one per column chunk with
+   *               dictionary page and (in)equality predicate
+   * @param pages Host device span of decoded page headers, one per column chunk with dictionary
+   *              page and (in)equality predicate
    * @param input_row_group_indices Lists of input row groups, one per source
-   * @param literals Lists of literals, one per input column
-   * @param operators Lists of operators, one per input column
+   * @param literals Lists of literals, one per column with (in)equality predicate
+   * @param operators Lists of operators, one per column with (in)equality predicate
    * @param total_row_groups Total number of row groups in `input_row_group_indices`
-   * @param output_dtypes Datatypes of output columns
-   * @param dictionary_col_schemas schema indices of dictionary columns only
-   * @param filter AST expression to filter row groups based on bloom filter membership
+   * @param dictionary_col_schemas Schema indices of columns with (in)equality predicate
+   * @param filter AST expression to filter row groups based on dictionary pages
    * @param stream CUDA stream used for device memory operations and kernel launches
    *
    * @return A pair of filtered row group indices if any is filtered.
    */
   [[nodiscard]] std::optional<std::vector<std::vector<size_type>>> apply_dictionary_filter(
-    cudf::host_span<rmm::device_buffer> hash_set_storage,
-    cudf::host_span<std::vector<size_type> const> hash_set_offsets,
+    cudf::detail::hostdevice_span<parquet::detail::ColumnChunkDesc const> chunks,
+    cudf::detail::hostdevice_span<parquet::detail::PageInfo const> pages,
     host_span<std::vector<size_type> const> input_row_group_indices,
     host_span<std::vector<ast::literal*> const> literals,
     host_span<std::vector<ast::ast_operator> const> operators,
-    size_type total_row_groups,
+    size_t total_row_groups,
     host_span<data_type const> output_dtypes,
     host_span<int const> dictionary_col_schemas,
     std::reference_wrapper<ast::expression const> filter,
