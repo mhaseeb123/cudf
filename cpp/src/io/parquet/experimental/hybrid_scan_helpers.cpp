@@ -407,10 +407,10 @@ std::vector<text::byte_range_info> aggregate_reader_metadata::get_dictionary_pag
   std::optional<std::reference_wrapper<ast::expression const>> filter)
 {
   // Collect equality literals for each input table column
-  auto const [literals, _] =
-    dictionary_literals_and_operators_collector{filter.value().get(),
-                                                static_cast<cudf::size_type>(output_dtypes.size())}
-      .get_literals_and_operators();
+  auto const literals =
+    dictionary_literals_collector{filter.value().get(),
+                                  static_cast<cudf::size_type>(output_dtypes.size())}
+      .get_literals();
 
   // Collect schema indices of columns with equality predicate(s)
   std::vector<thrust::tuple<cudf::size_type, cudf::size_type>> dictionary_col_schemas;
@@ -508,7 +508,6 @@ aggregate_reader_metadata::filter_row_groups_with_dictionary_pages(
   cudf::detail::hostdevice_span<parquet::detail::PageInfo const> pages,
   cudf::host_span<std::vector<cudf::size_type> const> row_group_indices,
   cudf::host_span<std::vector<ast::literal*> const> literals,
-  cudf::host_span<std::vector<ast::ast_operator> const> operators,
   cudf::host_span<data_type const> output_dtypes,
   cudf::host_span<int const> dictionary_col_schemas,
   std::optional<std::reference_wrapper<ast::expression const>> filter,
@@ -522,7 +521,6 @@ aggregate_reader_metadata::filter_row_groups_with_dictionary_pages(
                                                                       pages,
                                                                       row_group_indices,
                                                                       literals,
-                                                                      operators,
                                                                       total_row_groups,
                                                                       output_dtypes,
                                                                       dictionary_col_schemas,

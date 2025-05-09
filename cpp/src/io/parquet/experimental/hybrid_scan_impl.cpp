@@ -678,13 +678,10 @@ hybrid_scan_reader_impl::filter_row_groups_with_dictionary_pages(
   auto output_dtypes = get_output_types(_output_buffers_template);
 
   // Collect literals and operators for dictionary page filtering for each input table column
-  auto const [literals, operators] =
-    dictionary_literals_and_operators_collector{expr_conv.get_converted_expr().value().get(),
-                                                static_cast<cudf::size_type>(output_dtypes.size())}
-      .get_literals_and_operators();
-
-  CUDF_EXPECTS(literals.size() == operators.size(),
-               "Literals and operators must have the same size");
+  auto const literals =
+    dictionary_literals_collector{expr_conv.get_converted_expr().value().get(),
+                                  static_cast<cudf::size_type>(output_dtypes.size())}
+      .get_literals();
 
   // Return all row groups if no dictionary page filtering is needed
   if (literals.empty() or std::all_of(literals.begin(), literals.end(), [](auto& col_literals) {
@@ -708,7 +705,6 @@ hybrid_scan_reader_impl::filter_row_groups_with_dictionary_pages(
                                                             pages,
                                                             row_group_indices,
                                                             literals,
-                                                            operators,
                                                             output_dtypes,
                                                             dictionary_col_schemas,
                                                             expr_conv.get_converted_expr(),

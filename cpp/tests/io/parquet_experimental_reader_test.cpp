@@ -474,7 +474,8 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsOnly)
   // original reader
   {
     cudf::io::parquet_reader_options const options =
-      cudf::io::parquet_reader_options::builder().filter(filter_expression);
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{buffer.data(), buffer.size()})
+        .filter(filter_expression);
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({1, 2}), read_payload_table->view());
@@ -510,7 +511,8 @@ TEST_F(ParquetExperimentalReaderTest, TestPayloadColumns)
     CUDF_EXPECTS(read_filter_table->num_rows() == read_payload_table->num_rows(),
                  "Filter and payload tables should have the same number of rows");
     cudf::io::parquet_reader_options const options =
-      cudf::io::parquet_reader_options::builder().filter(filter_expression);
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{buffer.data(), buffer.size()})
+        .filter(filter_expression);
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({2}), read_payload_table->view());
@@ -525,7 +527,8 @@ TEST_F(ParquetExperimentalReaderTest, TestPayloadColumns)
     CUDF_EXPECTS(read_filter_table->num_rows() == read_payload_table->num_rows(),
                  "Filter and payload tables should have the same number of rows");
     cudf::io::parquet_reader_options const options =
-      cudf::io::parquet_reader_options::builder().filter(filter_expression);
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{buffer.data(), buffer.size()})
+        .filter(filter_expression);
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({2, 1}), read_payload_table->view());
@@ -563,7 +566,8 @@ TEST_F(ParquetExperimentalReaderTest, PrunePagesOnly)
   // original reader
   {
     cudf::io::parquet_reader_options const options =
-      cudf::io::parquet_reader_options::builder().filter(filter_expression);
+      cudf::io::parquet_reader_options::builder(cudf::io::source_info{buffer.data(), buffer.size()})
+        .filter(filter_expression);
     auto [expected_tbl, expected_meta] = cudf::io::read_parquet(options, stream);
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({0}), read_filter_table->view());
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_tbl->select({1, 2}), read_payload_table->view());
@@ -596,18 +600,23 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
   auto constexpr num_concat    = 1;
   auto [written_table, buffer] = create_parquet_with_stats<num_concat>();
 
-  // Filtering AST - table[0] == 99
-  // auto literal_value     = cudf::numeric_scalar<uint32_t>(99);
-  // auto literal           = cudf::ast::literal(literal_value);
-  // auto col_ref_0         = cudf::ast::column_name_reference("col_uint32");
-  // auto filter_expression = cudf::ast::operation(cudf::ast::ast_operator::EQUAL, col_ref_0,
-  // literal);
+  // Filtering - table[0] == 99
+  auto uint32_literal_value = cudf::numeric_scalar<uint32_t>(99);
+  auto uint32_literal       = cudf::ast::literal(uint32_literal_value);
+  auto uint32_col_ref_0     = cudf::ast::column_name_reference("col_uint32");
+  auto uint32_filter_expression =
+    cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal);
 
-  // Filtering AST - table[2] == 99
-  auto literal_value     = cudf::string_scalar("0099");
-  auto literal           = cudf::ast::literal(literal_value);
-  auto col_ref_0         = cudf::ast::column_name_reference("col_str");
-  auto filter_expression = cudf::ast::operation(cudf::ast::ast_operator::EQUAL, col_ref_0, literal);
+  // Filtering - table[2] == 99
+  auto string_literal_value = cudf::string_scalar("0099");
+  auto string_literal       = cudf::ast::literal(string_literal_value);
+  auto string_col_ref_0     = cudf::ast::column_name_reference("col_str");
+  auto string_filter_expression =
+    cudf::ast::operation(cudf::ast::ast_operator::EQUAL, string_col_ref_0, string_literal);
+
+  // Filtering AST - table[0] == 99 AND table[2] == 99
+  auto filter_expression = cudf::ast::operation(
+    cudf::ast::ast_operator::LOGICAL_AND, uint32_filter_expression, string_filter_expression);
 
   auto stream = cudf::get_default_stream();
   auto mr     = cudf::get_current_device_resource_ref();
@@ -627,26 +636,26 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
   auto const reader =
     std::make_unique<cudf::io::parquet::experimental::hybrid_scan_reader>(footer_buffer, options);
 
-  // Get page index byte range from the reader - API # 2
+  // Get page index byte range from the reader
   auto const page_index_byte_range = reader->get_page_index_bytes();
 
   // Fetch page index bytes from the input buffer
   auto const page_index_buffer = fetch_page_index_bytes(file_buffer_span, page_index_byte_range);
 
-  // Setup page index - API # 3
+  // Setup page index
   reader->setup_page_index(page_index_buffer);
 
-  // Get all row groups from the reader - API # 4
+  // Get all row groups from the reader
   auto input_row_group_indices = reader->all_row_groups(options);
 
   // Span to track current row group indices
   auto current_row_group_indices = cudf::host_span<cudf::size_type>(input_row_group_indices);
 
-  // Get dictionary page byte ranges from the reader - API # 6
+  // Get dictionary page byte ranges from the reader
   auto [_, dict_page_byte_ranges] =
     reader->secondary_filters_byte_ranges(current_row_group_indices, options);
 
-  // If we have dictionary page byte ranges, filter row groups with dictionary pages - API # 7
+  // If we have dictionary page byte ranges, filter row groups with dictionary pages
   std::vector<cudf::size_type> dictionary_page_filtered_row_group_indices;
   dictionary_page_filtered_row_group_indices.reserve(current_row_group_indices.size());
   if (dict_page_byte_ranges.size()) {
@@ -663,5 +672,5 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
   }
 
   // All row groups should be filtered out
-  EXPECT_EQ(current_row_group_indices.size(), 4);
+  EXPECT_EQ(current_row_group_indices.size(), 1);
 }
