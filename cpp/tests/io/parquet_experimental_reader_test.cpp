@@ -125,7 +125,7 @@ std::vector<rmm::device_buffer> fetch_byte_ranges(
 
 template <typename T>
 std::enable_if_t<std::is_same_v<T, cudf::string_view>, cudf::test::strings_column_wrapper> constant(
-  cudf::size_type value, cudf::size_type num_ordered_rows)
+  cudf::size_type value)
 {
   std::array<char, 5> buf;
   auto elements =
@@ -157,7 +157,7 @@ auto create_parquet_with_stats()
 
   auto col0 = testdata::ascending<uint32_t>();
   auto col1 = testdata::descending<int64_t>();
-  auto col2 = constant<cudf::string_view>(99, 20000);
+  auto col2 = constant<cudf::string_view>(99);
 
   auto expected = table_view{{col0, col1, col2}};
   auto table    = cudf::concatenate(std::vector<table_view>(NumTableConcats, expected));
