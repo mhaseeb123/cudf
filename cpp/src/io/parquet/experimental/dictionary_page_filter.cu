@@ -693,7 +693,7 @@ struct dictionary_caster {
     }();
 
     std::vector<rmm::device_buffer> results_buffers(literals.size());
-    thrust::host_vector<bool*> host_results_ptrs(literals.size());
+    std::vector<bool*> host_results_ptrs(literals.size());
     std::for_each(thrust::counting_iterator<size_t>(0),
                   thrust::counting_iterator(literals.size()),
                   [&](auto i) {
@@ -815,7 +815,7 @@ struct dictionary_caster {
     auto const total_num_scalars = static_cast<cudf::size_type>(scalars.size());
 
     std::vector<rmm::device_buffer> results_buffers(literals.size());
-    thrust::host_vector<bool*> host_results_ptrs(literals.size());
+    std::vector<bool*> host_results_ptrs(literals.size());
     std::for_each(thrust::counting_iterator<size_t>(0),
                   thrust::counting_iterator(literals.size()),
                   [&](auto i) {
