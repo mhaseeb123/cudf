@@ -151,7 +151,8 @@ std::enable_if_t<std::is_same_v<T, cudf::string_view>, cudf::test::strings_colum
  * @return Tuple of table and Parquet host buffer
  */
 template <size_t NumTableConcats>
-auto create_parquet_with_stats()
+auto create_parquet_with_stats(
+  cudf::io::compression_type compression = cudf::io::compression_type::NONE)
 {
   static_assert(NumTableConcats >= 1, "Concatenated table must contain at least one table");
 
@@ -175,7 +176,7 @@ auto create_parquet_with_stats()
       .row_group_size_rows(5000)
       .max_page_size_rows(1000)
       .dictionary_policy(cudf::io::dictionary_policy::ALWAYS)
-      .compression(cudf::io::compression_type::NONE)
+      .compression(compression)
       .stats_level(cudf::io::statistics_freq::STATISTICS_COLUMN);
 
   if constexpr (NumTableConcats > 1) {
@@ -597,10 +598,11 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
   // A table not concated with itself with result in a parquet file with several row groups each
   // with a single page. Since there is only one page per row group, the page and row group stats
   // are identical and we can only prune row groups.
-  auto constexpr num_concat    = 1;
-  auto [written_table, buffer] = create_parquet_with_stats<num_concat>();
-  auto stream                  = cudf::get_default_stream();
-  auto mr                      = cudf::get_current_device_resource_ref();
+  auto constexpr num_concat = 1;
+  auto [written_table, buffer] =
+    create_parquet_with_stats<num_concat>(cudf::io::compression_type::AUTO);
+  auto stream = cudf::get_default_stream();
+  auto mr     = cudf::get_current_device_resource_ref();
 
   // Input file buffer span
   auto const file_buffer_span =

@@ -965,4 +965,13 @@ void hybrid_scan_reader_impl::setup_next_subpass(parquet_reader_options const& o
 #endif  // PAGE_PRUNING_DEBUG
 }
 
+rmm::device_buffer hybrid_scan_reader_impl::decompress_dictionary_page_data(
+  cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
+  cudf::detail::hostdevice_span<PageInfo> pages,
+  rmm::cuda_stream_view stream)
+{
+  auto const page_mask = thrust::host_vector<bool>(pages.size(), true);
+  return std::get<0>(decompress_page_data(chunks, pages, host_span<PageInfo>{}, page_mask, stream));
+}
+
 }  // namespace cudf::io::parquet::experimental::detail

@@ -175,7 +175,7 @@ class hybrid_scan_reader_impl {
 
   /**
    * @brief Updates the output row mask such that such that out_row_mask[i] = true iff
-   * in_row_mask[i] is valid and true.
+   * in_row_mask[i] is valid and true
    *
    * Updates the output row mask to reflect the final valid and surviving rows from the input row
    * mask. This is inline with the masking behavior of cudf::detail::apply_boolean_mask.
@@ -203,7 +203,7 @@ class hybrid_scan_reader_impl {
                           rmm::cuda_stream_view stream);
 
   /**
-   * @brief Set the mask for pages in the current pass.
+   * @brief Set the mask for pages in the current pass
    *
    * @param data_page_mask Input data page mask from page-pruning step for the current pass
    */
@@ -219,7 +219,7 @@ class hybrid_scan_reader_impl {
                          cudf::mutable_column_view row_mask);
 
   /**
-   * @brief Select the columns to be read.
+   * @brief Select the columns to be read
    *
    * @param read_mode Read mode
    * @param options Reader options
@@ -227,7 +227,7 @@ class hybrid_scan_reader_impl {
   void select_columns(read_mode read_mode, parquet_reader_options const& options);
 
   /**
-   * @brief Get the byte ranges for the input column chunks.
+   * @brief Get the byte ranges for the input column chunks
    *
    * @param row_group_indices The row groups to read
    * @return A pair of vectors containing the byte ranges and the source indices
@@ -244,7 +244,7 @@ class hybrid_scan_reader_impl {
   void update_output_nullmasks_for_pruned_pages(cudf::host_span<bool const> page_mask);
 
   /**
-   * @brief Perform the necessary data preprocessing for parsing file later on.
+   * @brief Perform the necessary data preprocessing for parsing file later on
    *
    * @param row_group_indices The row groups to read
    * @param column_chunk_buffers Device buffers containing column chunk data
@@ -257,7 +257,7 @@ class hybrid_scan_reader_impl {
                     parquet_reader_options const& options);
 
   /**
-   * @brief Prepare dictionaries for dictionary page filtering.
+   * @brief Prepare dictionaries for dictionary page filtering
    *
    * @param row_group_indices The row groups to read
    * @param dictionary_page_data Device buffers containing dictionary page data
@@ -265,11 +265,13 @@ class hybrid_scan_reader_impl {
    * @param options Parquet reader options
    * @param stream CUDA stream
    *
-   * @return A pair of vectors containing host device vectors of column chunk descriptors and
-   * dictionary page headers, one per column chunk with dictionary and (in)equality predicate
+   * @return A tuple of a boolean indicating if any of the chunks have compressed data, a host
+   * device vector of column chunk descriptors, and a host device vector of decoded dictionary page
+   * headers
    */
-  std::pair<cudf::detail::hostdevice_vector<ColumnChunkDesc>,
-            cudf::detail::hostdevice_vector<PageInfo>>
+  std::tuple<bool,
+             cudf::detail::hostdevice_vector<ColumnChunkDesc>,
+             cudf::detail::hostdevice_vector<PageInfo>>
   prepare_dictionaries(cudf::host_span<std::vector<size_type> const> row_group_indices,
                        cudf::host_span<rmm::device_buffer> dictionary_page_data,
                        cudf::host_span<int const> dictionary_col_schemas,
@@ -277,7 +279,20 @@ class hybrid_scan_reader_impl {
                        rmm::cuda_stream_view stream);
 
   /**
-   * @brief Preprocess step for the entire file.
+   * @brief Decompress dictionary pages
+   *
+   * @param chunks Host device span of column chunk descriptors
+   * @param pages Host device span of page information
+   * @param stream CUDA stream
+   * @return A buffer containing decompressed dictionary page data
+   */
+  rmm::device_buffer decompress_dictionary_page_data(
+    cudf::detail::hostdevice_span<ColumnChunkDesc const> chunks,
+    cudf::detail::hostdevice_span<PageInfo> pages,
+    rmm::cuda_stream_view stream);
+
+  /**
+   * @brief Preprocess step for the entire file
    *
    * Only ever called once. This function reads in rowgroup and associated chunk
    * information and computes the schedule of top level passes (see `pass_intermediate_data`).
@@ -299,7 +314,7 @@ class hybrid_scan_reader_impl {
                        parquet_reader_options const& options);
 
   /**
-   * @brief Setup step for the next input read pass.
+   * @brief Setup step for the next input read pass
    *
    * A 'pass' is defined as a subset of row groups read out of the globally
    * requested set of all row groups.
@@ -311,7 +326,7 @@ class hybrid_scan_reader_impl {
                        parquet_reader_options const& options);
 
   /**
-   * @brief Setup step for the next decompression subpass.
+   * @brief Setup step for the next decompression subpass
    *
    * A 'subpass' is defined as a subset of pages within a pass that are
    * decompressed and decoded as a batch. Subpasses may be further subdivided
@@ -322,14 +337,14 @@ class hybrid_scan_reader_impl {
   void setup_next_subpass(parquet_reader_options const& options);
 
   /**
-   * @brief Populate the output table metadata from the parquet file metadata.
+   * @brief Populate the output table metadata from the parquet file metadata
    *
    * @param out_metadata The output table metadata to add to
    */
   void populate_metadata(table_metadata& out_metadata) const;
 
   /**
-   * @brief Setup pointers to columns chunks to be processed for this pass.
+   * @brief Setup pointers to columns chunks to be processed for this pass
    *
    * Does not decompress the chunk data.
    *
@@ -338,12 +353,12 @@ class hybrid_scan_reader_impl {
   bool setup_column_chunks();
 
   /**
-   * @brief Setup compressed column chunks data and decode page headers for the current pass.
+   * @brief Setup compressed column chunks data and decode page headers for the current pass
    */
   void setup_compressed_data(std::vector<rmm::device_buffer> column_chunk_buffers);
 
   /**
-   * @brief Build string dictionary indices for a pass.
+   * @brief Build string dictionary indices for a pass
    */
   void build_string_dict_indices();
 
@@ -359,7 +374,7 @@ class hybrid_scan_reader_impl {
 
   /**
    * @brief Perform some preprocessing for subpass page data and also compute the split locations
-   * {skip_rows, num_rows} for chunked reading.
+   * {skip_rows, num_rows} for chunked reading
    *
    * There are several pieces of information we can't compute directly from row counts in
    * the parquet headers when dealing with nested schemas:
@@ -375,7 +390,7 @@ class hybrid_scan_reader_impl {
   void preprocess_subpass_pages(size_t chunk_read_limit);
 
   /**
-   * @brief Allocate nesting information storage for all pages and set pointers to it.
+   * @brief Allocate nesting information storage for all pages and set pointers to it
    *
    * One large contiguous buffer of PageNestingInfo structs is allocated and
    * distributed among the PageInfo structs.
@@ -386,7 +401,7 @@ class hybrid_scan_reader_impl {
   void allocate_nesting_info();
 
   /**
-   * @brief Allocate space for use when decoding definition/repetition levels.
+   * @brief Allocate space for use when decoding definition/repetition levels
    *
    * One large contiguous buffer of data allocated and
    * distributed among the PageInfo structs.
@@ -400,7 +415,7 @@ class hybrid_scan_reader_impl {
 
   /**
    * @brief Finalize the output table by adding empty columns for the non-selected columns in
-   * schema.
+   * schema
    *
    * @tparam RowMaskView View type of the row mask column
    *
@@ -418,7 +433,7 @@ class hybrid_scan_reader_impl {
                                       RowMaskView row_mask);
 
   /**
-   * @brief Allocate data buffers for the output columns.
+   * @brief Allocate data buffers for the output columns
    *
    * @param skip_rows Crop all rows below skip_rows
    * @param num_rows Maximum number of rows to read
@@ -433,7 +448,7 @@ class hybrid_scan_reader_impl {
   cudf::detail::host_vector<size_t> calculate_page_string_offsets();
 
   /**
-   * @brief Converts the page data and outputs to columns.
+   * @brief Converts the page data and outputs to columns
    *
    * @param skip_rows Minimum number of rows from start
    * @param num_rows Number of rows to output
@@ -441,7 +456,7 @@ class hybrid_scan_reader_impl {
   void decode_page_data(size_t skip_rows, size_t num_rows);
 
   /**
-   * @brief Creates file-wide parquet chunk information.
+   * @brief Creates file-wide parquet chunk information
    *
    * Creates information about all chunks in the file, storing it in
    * the file-wide _file_itm_data structure.
@@ -470,7 +485,7 @@ class hybrid_scan_reader_impl {
   }
 
   /**
-   * @brief Read a chunk of data and return an output table.
+   * @brief Read a chunk of data and return an output table
    *
    * This function is called internally and expects all preprocessing steps have already been done.
    *

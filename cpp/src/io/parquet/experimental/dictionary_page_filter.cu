@@ -1136,8 +1136,9 @@ aggregate_reader_metadata::apply_dictionary_filter(
                                                              stream);
 }
 
-std::pair<cudf::detail::hostdevice_vector<ColumnChunkDesc>,
-          cudf::detail::hostdevice_vector<PageInfo>>
+std::tuple<bool,
+           cudf::detail::hostdevice_vector<ColumnChunkDesc>,
+           cudf::detail::hostdevice_vector<PageInfo>>
 hybrid_scan_reader_impl::prepare_dictionaries(
   cudf::host_span<std::vector<size_type> const> row_group_indices,
   cudf::host_span<rmm::device_buffer> dictionary_page_data,
@@ -1159,7 +1160,7 @@ hybrid_scan_reader_impl::prepare_dictionaries(
   auto const total_column_chunks = dictionary_page_data.size();
 
   // Boolean to check if any of the column chunnks have compressed data
-  [[maybe_unused]] auto has_compressed_data = false;
+  auto has_compressed_data = false;
 
   // Initialize column chunk descriptors
   auto chunks = cudf::detail::hostdevice_vector<cudf::io::parquet::detail::ColumnChunkDesc>(
@@ -1222,7 +1223,7 @@ hybrid_scan_reader_impl::prepare_dictionaries(
   // Decode dictionary page headers
   decode_dictionary_page_headers(chunks, pages, stream);
 
-  return {std::move(chunks), std::move(pages)};
+  return {has_compressed_data, std::move(chunks), std::move(pages)};
 }
 
 }  // namespace cudf::io::parquet::experimental::detail

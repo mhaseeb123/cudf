@@ -698,8 +698,14 @@ hybrid_scan_reader_impl::filter_row_groups_with_dictionary_pages(
                   std::back_inserter(dictionary_col_schemas),
                   [](auto& dict_literals) { return not dict_literals.empty(); });
 
-  auto const [chunks, pages] = prepare_dictionaries(
+  auto [has_compressed_data, chunks, pages] = prepare_dictionaries(
     row_group_indices, dictionary_page_data, dictionary_col_schemas, options, stream);
+
+  auto decompressed_dictionary_page_data = std::optional<rmm::device_buffer>{};
+  if (has_compressed_data) {
+    decompressed_dictionary_page_data = decompress_dictionary_page_data(chunks, pages, stream);
+    pages.host_to_device_async(stream);
+  }
 
   return _metadata->filter_row_groups_with_dictionary_pages(chunks,
                                                             pages,
