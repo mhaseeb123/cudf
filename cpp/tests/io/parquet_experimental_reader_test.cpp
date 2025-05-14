@@ -599,78 +599,141 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
   // are identical and we can only prune row groups.
   auto constexpr num_concat    = 1;
   auto [written_table, buffer] = create_parquet_with_stats<num_concat>();
-
-  // Filtering - table[0] == 99
-  auto uint32_literal_value = cudf::numeric_scalar<uint32_t>(99);
-  auto uint32_literal       = cudf::ast::literal(uint32_literal_value);
-  auto uint32_col_ref_0     = cudf::ast::column_name_reference("col_uint32");
-  auto uint32_filter_expression =
-    cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal);
-
-  // Filtering - table[2] == 99
-  auto string_literal_value = cudf::string_scalar("0099");
-  auto string_literal       = cudf::ast::literal(string_literal_value);
-  auto string_col_ref_0     = cudf::ast::column_name_reference("col_str");
-  auto string_filter_expression =
-    cudf::ast::operation(cudf::ast::ast_operator::EQUAL, string_col_ref_0, string_literal);
-
-  // Filtering AST - table[0] == 99 AND table[2] == 99
-  auto filter_expression = cudf::ast::operation(
-    cudf::ast::ast_operator::LOGICAL_AND, uint32_filter_expression, string_filter_expression);
-
-  auto stream = cudf::get_default_stream();
-  auto mr     = cudf::get_current_device_resource_ref();
-
-  // Create reader options with empty source info
-  cudf::io::parquet_reader_options options =
-    cudf::io::parquet_reader_options::builder().filter(filter_expression);
+  auto stream                  = cudf::get_default_stream();
+  auto mr                      = cudf::get_current_device_resource_ref();
 
   // Input file buffer span
   auto const file_buffer_span =
     cudf::host_span<uint8_t const>(reinterpret_cast<uint8_t const*>(buffer.data()), buffer.size());
 
-  // Fetch footer and page index bytes from the buffer.
-  auto const footer_buffer = fetch_footer_bytes(file_buffer_span);
+  // Lambda to filter row groups with dictionaries
+  auto const filter_row_groups_with_dictionaries = [&](auto const& filter_expression,
+                                                       cudf::size_type expected_row_groups) {
+    // Create reader options with empty source info
+    cudf::io::parquet_reader_options options =
+      cudf::io::parquet_reader_options::builder().filter(filter_expression);
 
-  // Create hybrid scan reader with footer bytes
-  auto const reader =
-    std::make_unique<cudf::io::parquet::experimental::hybrid_scan_reader>(footer_buffer, options);
+    // Fetch footer and page index bytes from the buffer.
+    auto const footer_buffer = fetch_footer_bytes(file_buffer_span);
 
-  // Get page index byte range from the reader
-  auto const page_index_byte_range = reader->get_page_index_bytes();
+    // Create hybrid scan reader with footer bytes
+    auto const reader =
+      std::make_unique<cudf::io::parquet::experimental::hybrid_scan_reader>(footer_buffer, options);
 
-  // Fetch page index bytes from the input buffer
-  auto const page_index_buffer = fetch_page_index_bytes(file_buffer_span, page_index_byte_range);
+    // Get page index byte range from the reader
+    auto const page_index_byte_range = reader->get_page_index_bytes();
 
-  // Setup page index
-  reader->setup_page_index(page_index_buffer);
+    // Fetch page index bytes from the input buffer
+    auto const page_index_buffer = fetch_page_index_bytes(file_buffer_span, page_index_byte_range);
 
-  // Get all row groups from the reader
-  auto input_row_group_indices = reader->all_row_groups(options);
+    // Setup page index
+    reader->setup_page_index(page_index_buffer);
 
-  // Span to track current row group indices
-  auto current_row_group_indices = cudf::host_span<cudf::size_type>(input_row_group_indices);
+    // Get all row groups from the reader
+    auto input_row_group_indices = reader->all_row_groups(options);
 
-  // Get dictionary page byte ranges from the reader
-  auto [_, dict_page_byte_ranges] =
-    reader->secondary_filters_byte_ranges(current_row_group_indices, options);
+    // Span to track current row group indices
+    auto current_row_group_indices = cudf::host_span<cudf::size_type>(input_row_group_indices);
 
-  // If we have dictionary page byte ranges, filter row groups with dictionary pages
-  std::vector<cudf::size_type> dictionary_page_filtered_row_group_indices;
-  dictionary_page_filtered_row_group_indices.reserve(current_row_group_indices.size());
-  if (dict_page_byte_ranges.size()) {
-    // Fetch dictionary page buffers from the input file buffer
-    std::vector<rmm::device_buffer> dictionary_page_buffers =
-      fetch_byte_ranges(file_buffer_span, dict_page_byte_ranges, stream, mr);
+    // Get dictionary page byte ranges from the reader
+    auto const dict_page_byte_ranges =
+      std::get<1>(reader->secondary_filters_byte_ranges(current_row_group_indices, options));
 
-    // NOT YET IMPLEMENTED - Filter row groups with dictionary pages
-    dictionary_page_filtered_row_group_indices = reader->filter_row_groups_with_dictionary_pages(
-      dictionary_page_buffers, current_row_group_indices, options, stream);
+    // If we have dictionary page byte ranges, filter row groups with dictionary pages
+    std::vector<cudf::size_type> dictionary_page_filtered_row_group_indices;
+    dictionary_page_filtered_row_group_indices.reserve(current_row_group_indices.size());
+    if (dict_page_byte_ranges.size()) {
+      // Fetch dictionary page buffers from the input file buffer
+      std::vector<rmm::device_buffer> dictionary_page_buffers =
+        fetch_byte_ranges(file_buffer_span, dict_page_byte_ranges, stream, mr);
 
-    // Update current row group indices
-    current_row_group_indices = dictionary_page_filtered_row_group_indices;
+      dictionary_page_filtered_row_group_indices = reader->filter_row_groups_with_dictionary_pages(
+        dictionary_page_buffers, current_row_group_indices, options, stream);
+
+      // Update current row group indices
+      current_row_group_indices = dictionary_page_filtered_row_group_indices;
+    }
+
+    EXPECT_EQ(current_row_group_indices.size(), expected_row_groups);
+  };
+
+  {
+    // Filtering - table[0] == 99 AND table[2] == 0099
+    auto uint32_literal_value = cudf::numeric_scalar<uint32_t>(50);
+    auto uint32_literal       = cudf::ast::literal(uint32_literal_value);
+    auto uint32_col_ref_0     = cudf::ast::column_name_reference("col_uint32");
+    auto uint32_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal);
+
+    auto string_literal_value = cudf::string_scalar("0099");
+    auto string_literal       = cudf::ast::literal(string_literal_value);
+    auto string_col_ref_0     = cudf::ast::column_name_reference("col_str");
+    auto string_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, string_col_ref_0, string_literal);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_AND, uint32_filter_expression, string_filter_expression);
+
+    constexpr cudf::size_type expected_row_groups = 1;
+    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
   }
 
-  // All row groups should be filtered out
-  EXPECT_EQ(current_row_group_indices.size(), 1);
+  {
+    // Filtering - table[0] == 99 or table[0] == 100
+    auto uint32_literal_value  = cudf::numeric_scalar<uint32_t>(50);
+    auto uint32_literal_value2 = cudf::numeric_scalar<uint32_t>(100);
+    auto uint32_literal        = cudf::ast::literal(uint32_literal_value);
+    auto uint32_literal2       = cudf::ast::literal(uint32_literal_value2);
+    auto uint32_col_ref_0      = cudf::ast::column_name_reference("col_uint32");
+    auto uint32_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal);
+    auto uint32_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_OR, uint32_filter_expression, uint32_filter_expression2);
+
+    constexpr cudf::size_type expected_row_groups = 2;
+    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
+  }
+
+  {
+    // Filtering - table[0] == 99 or table[0] == 100
+    auto uint32_literal_value  = cudf::numeric_scalar<uint32_t>(50);
+    auto uint32_literal_value2 = cudf::numeric_scalar<uint32_t>(100);
+    auto uint32_literal_value3 = cudf::numeric_scalar<uint32_t>(150);
+    auto uint32_literal        = cudf::ast::literal(uint32_literal_value);
+    auto uint32_literal2       = cudf::ast::literal(uint32_literal_value2);
+    auto uint32_literal3       = cudf::ast::literal(uint32_literal_value3);
+    auto uint32_col_ref_0      = cudf::ast::column_name_reference("col_uint32");
+    auto uint32_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal);
+    auto uint32_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal2);
+    auto uint32_filter_expression3 =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal3);
+    auto filter_expression_x = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_OR, uint32_filter_expression, uint32_filter_expression2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_OR, filter_expression_x, uint32_filter_expression3);
+
+    constexpr cudf::size_type expected_row_groups = 3;
+    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
+  }
+
+  {
+    // Filtering - table[2] == 0099 and table[2] == 0100
+    auto string_literal_value  = cudf::string_scalar("0099");  // in all row groups
+    auto string_literal_value2 = cudf::string_scalar("0100");  // in no row group
+    auto string_literal        = cudf::ast::literal(string_literal_value);
+    auto string_literal2       = cudf::ast::literal(string_literal_value2);
+    auto string_col_ref_0      = cudf::ast::column_name_reference("col_str");
+    auto string_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, string_col_ref_0, string_literal);
+    auto string_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, string_col_ref_0, string_literal2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_AND, string_filter_expression, string_filter_expression2);
+
+    constexpr cudf::size_type expected_row_groups = 0;
+    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
+  }
 }
