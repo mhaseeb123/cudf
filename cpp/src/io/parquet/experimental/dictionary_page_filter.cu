@@ -23,14 +23,9 @@
 #include <cudf/ast/expressions.hpp>
 #include <cudf/detail/cuco_helpers.hpp>
 #include <cudf/detail/nvtx/ranges.hpp>
-#include <cudf/detail/transform.hpp>
 #include <cudf/detail/utilities/cuda.cuh>
-#include <cudf/detail/utilities/host_worker_pool.hpp>
 #include <cudf/hashing/detail/default_hash.cuh>
 #include <cudf/hashing/detail/helper_functions.cuh>
-#include <cudf/hashing/detail/xxhash_64.cuh>
-#include <cudf/io/parquet_schema.hpp>
-#include <cudf/logger.hpp>
 #include <cudf/utilities/span.hpp>
 #include <cudf/utilities/traits.hpp>
 #include <cudf/utilities/type_checks.hpp>
@@ -42,9 +37,7 @@
 
 #include <cuco/static_set.cuh>
 #include <thrust/iterator/counting_iterator.h>
-#include <thrust/tabulate.h>
 
-#include <future>
 #include <optional>
 
 namespace cudf::io::parquet::experimental::detail {
@@ -56,23 +49,25 @@ using parquet::detail::PageInfo;
 
 namespace {
 
-// Decoder kernels parameters
-auto constexpr int96_size          = 12;
-auto constexpr decode_block_size   = 128;
+// Decode kernel parameters
+auto constexpr int96_size        = 12;   ///< Size of INT96 physical type
+auto constexpr decode_block_size = 128;  ///< Must be a multiple of warp_size
+/// Maximum number of literals to evaluate while decoding column dictionaries
 auto constexpr max_inline_literals = 2;
 
-// cuco static set parameters
-using key_type                    = cudf::size_type;
-auto constexpr empty_key_sentinel = key_type{-1};  // std::numeric_limits<key_type>::max();
-auto constexpr set_cg_size        = 1;
-auto constexpr bucket_size        = 1;
-auto constexpr occupancy_factor   = 70;  // cuCollections suggests targeting a 70% occupancy factor
-using storage_type                = cuco::bucket_storage<key_type,
+// cuCollections static set parameters
+using key_type = cudf::size_type;                  ///< Using data indices (size_type) as set keys
+auto constexpr empty_key_sentinel = key_type{-1};  ///< We will never encounter a -1 index.
+auto constexpr set_cg_size        = 1;             ///< Cooperative group size for cuco::static_set
+auto constexpr bucket_size        = 1;             ///< Number of buckets per set slot
+auto constexpr occupancy_factor = 70;  ///< cuCollections suggests targeting a 70% occupancy factor
+
+using storage_type     = cuco::bucket_storage<key_type,
                                           bucket_size,
                                           cuco::extent<std::size_t>,
                                           cudf::detail::cuco_allocator<char>>;
-using storage_ref_type            = typename storage_type::ref_type;
-using bucket_type                 = typename storage_type::bucket_type;
+using storage_ref_type = typename storage_type::ref_type;
+using bucket_type      = typename storage_type::bucket_type;
 
 template <typename T>
 struct insert_hash_functor {
@@ -663,7 +658,7 @@ struct dictionary_caster {
 
     auto const total_bucket_storage_size = static_cast<size_t>(host_set_offsets.back());
     auto const total_num_values          = static_cast<size_t>(host_value_offsets.back());
-    auto const total_num_literals        = literals.size();
+    auto const total_num_literals        = static_cast<cudf::size_type>(literals.size());
 
     // Create a single bulk storage used by all sub-dictionaries
     auto set_storage = storage_type{
@@ -678,7 +673,7 @@ struct dictionary_caster {
     kernel_error error_code(stream);
 
     std::vector<ast::generic_scalar_device_view> host_scalars;
-    host_scalars.reserve(literals.size());
+    host_scalars.reserve(total_num_literals);
     std::for_each(literals.begin(), literals.end(), [&](auto const& literal) {
       host_scalars.push_back(literal->get_value());
     });
@@ -692,15 +687,14 @@ struct dictionary_caster {
       return std::min<cudf::size_type>(query_block_size, 128);
     }();
 
-    std::vector<rmm::device_buffer> results_buffers(literals.size());
-    std::vector<bool*> host_results_ptrs(literals.size());
-    std::for_each(thrust::counting_iterator<size_t>(0),
-                  thrust::counting_iterator(literals.size()),
-                  [&](auto i) {
-                    results_buffers[i] = rmm::device_buffer(
-                      total_row_groups, stream, cudf::get_current_device_resource_ref());
-                    host_results_ptrs[i] = static_cast<bool*>(results_buffers[i].data());
-                  });
+    std::vector<rmm::device_buffer> results_buffers(total_num_literals);
+    std::vector<bool*> host_results_ptrs(total_num_literals);
+    std::for_each(
+      thrust::counting_iterator(0), thrust::counting_iterator(total_num_literals), [&](auto i) {
+        results_buffers[i] =
+          rmm::device_buffer(total_row_groups, stream, cudf::get_current_device_resource_ref());
+        host_results_ptrs[i] = static_cast<bool*>(results_buffers[i].data());
+      });
     auto results_ptrs = cudf::detail::make_device_uvector_async(
       host_results_ptrs, stream, cudf::get_current_device_resource_ref());
 
@@ -812,17 +806,17 @@ struct dictionary_caster {
 
     auto const scalars = cudf::detail::make_device_uvector_async(
       host_scalars, stream, cudf::get_current_device_resource_ref());
-    auto const total_num_scalars = static_cast<cudf::size_type>(scalars.size());
+    auto const total_num_scalars  = static_cast<cudf::size_type>(scalars.size());
+    auto const total_num_literals = static_cast<cudf::size_type>(literals.size());
 
-    std::vector<rmm::device_buffer> results_buffers(literals.size());
-    std::vector<bool*> host_results_ptrs(literals.size());
-    std::for_each(thrust::counting_iterator<size_t>(0),
-                  thrust::counting_iterator(literals.size()),
-                  [&](auto i) {
-                    results_buffers[i] = rmm::device_buffer(
-                      total_row_groups, stream, cudf::get_current_device_resource_ref());
-                    host_results_ptrs[i] = static_cast<bool*>(results_buffers[i].data());
-                  });
+    std::vector<rmm::device_buffer> results_buffers(total_num_literals);
+    std::vector<bool*> host_results_ptrs(total_num_literals);
+    std::for_each(
+      thrust::counting_iterator(0), thrust::counting_iterator(total_num_literals), [&](auto i) {
+        results_buffers[i] =
+          rmm::device_buffer(total_row_groups, stream, cudf::get_current_device_resource_ref());
+        host_results_ptrs[i] = static_cast<bool*>(results_buffers[i].data());
+      });
 
     auto results_ptrs = cudf::detail::make_device_uvector_async(
       host_results_ptrs, stream, cudf::get_current_device_resource_ref());

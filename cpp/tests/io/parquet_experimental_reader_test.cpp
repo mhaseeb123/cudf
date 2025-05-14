@@ -696,7 +696,7 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
   }
 
   {
-    // Filtering - table[0] == 99 or table[0] == 100
+    // Filtering - table[0] == 99 or table[0] == 100 or table[0] == 150
     auto uint32_literal_value  = cudf::numeric_scalar<uint32_t>(50);
     auto uint32_literal_value2 = cudf::numeric_scalar<uint32_t>(100);
     auto uint32_literal_value3 = cudf::numeric_scalar<uint32_t>(150);
