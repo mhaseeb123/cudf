@@ -64,6 +64,7 @@ class aggregate_reader_metadata : public aggregate_reader_metadata_base {
    *              page and (in)equality predicate
    * @param input_row_group_indices Lists of input row groups, one per source
    * @param literals Lists of literals, one per column with (in)equality predicate
+   * @param operators Lists of operators, one per column with (in)equality predicate
    * @param total_row_groups Total number of row groups in `input_row_group_indices`
    * @param dictionary_col_schemas Schema indices of columns with (in)equality predicate
    * @param filter AST expression to filter row groups based on dictionary pages
@@ -76,6 +77,7 @@ class aggregate_reader_metadata : public aggregate_reader_metadata_base {
     cudf::detail::hostdevice_span<parquet::detail::PageInfo const> pages,
     host_span<std::vector<size_type> const> input_row_group_indices,
     host_span<std::vector<ast::literal*> const> literals,
+    cudf::host_span<std::vector<ast::ast_operator> const> operators,
     size_t total_row_groups,
     host_span<data_type const> output_dtypes,
     host_span<int const> dictionary_col_schemas,
@@ -222,6 +224,7 @@ class aggregate_reader_metadata : public aggregate_reader_metadata_base {
    *              page and (in)equality predicate
    * @param row_group_indices Input row groups indices
    * @param literals Lists of literals, one per input column
+   * @param operators Lists of operators, one per input column
    * @param output_dtypes Datatypes of output columns
    * @param dictionary_col_schemas Schema indices of output columns with (in)equality predicate
    * @param filter Optional AST expression to filter row groups based on dictionary pages
@@ -234,6 +237,7 @@ class aggregate_reader_metadata : public aggregate_reader_metadata_base {
     cudf::detail::hostdevice_span<parquet::detail::PageInfo const> pages,
     cudf::host_span<std::vector<cudf::size_type> const> row_group_indices,
     cudf::host_span<std::vector<ast::literal*> const> literals,
+    cudf::host_span<std::vector<ast::ast_operator> const> operators,
     cudf::host_span<data_type const> output_dtypes,
     cudf::host_span<int const> dictionary_col_schemas,
     std::optional<std::reference_wrapper<ast::expression const>> filter,
@@ -304,21 +308,37 @@ class aggregate_reader_metadata : public aggregate_reader_metadata_base {
 };
 
 /**
- * @brief Collects lists of equal and not-equal predicate literals in the AST expression, one list
- * per input table column. This is used in row group filtering based on dictionary pages.
+ * @brief Collects lists of equal and not-equal predicate literals and operators in the AST
+ * expression, one per input table column. This is used in row group filtering based on dictionary
+ * pages
  */
 class dictionary_literals_collector : public equality_literals_collector {
  public:
-  dictionary_literals_collector();
+  dictionary_literals_collector() = default;
 
   dictionary_literals_collector(ast::expression const& expr, cudf::size_type num_input_columns);
 
+  // Bring all overloads of `visit` from equality_literals_collector into scope
   using equality_literals_collector::visit;
 
   /**
    * @copydoc ast::detail::expression_transformer::visit(ast::operation const& )
    */
   std::reference_wrapper<ast::expression const> visit(ast::operation const& expr) override;
+
+  /**
+   * @brief Returns vectors of collected literals and (in)equality operators in the AST expression,
+   * one per input table column
+   *
+   * @return A pair of vectors of collected literals and (in)equality operators, one per input table
+   * column
+   */
+  [[nodiscard]] std::pair<std::vector<std::vector<ast::literal*>>,
+                          std::vector<std::vector<ast::ast_operator>>>
+  get_literals_and_operators() &&;
+
+ private:
+  std::vector<std::vector<ast::ast_operator>> _operators;
 };
 
 }  // namespace cudf::io::parquet::experimental::detail
