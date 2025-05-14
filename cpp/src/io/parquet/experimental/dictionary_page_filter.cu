@@ -57,9 +57,9 @@ using parquet::detail::PageInfo;
 namespace {
 
 // Decoder kernels parameters
-constexpr cudf::size_type int96_size          = 12;
-constexpr cudf::size_type decode_block_size   = 128;
-constexpr cudf::size_type max_inline_literals = 2;
+auto constexpr int96_size          = 12;
+auto constexpr decode_block_size   = 128;
+auto constexpr max_inline_literals = 2;
 
 // cuco static set parameters
 using key_type                    = cudf::size_type;
@@ -209,6 +209,11 @@ __global__ void build_string_dictionaries(PageInfo const* pages,
                  cuda::std::memory_order_relaxed);
   };
 
+  auto const is_error_set = [&]() {
+    return cuda::atomic_ref<kernel_error::value_type, cuda::thread_scope_block>{*error}.load(
+             cuda::std::memory_order_relaxed) != 0;
+  };
+
   auto const value_offset = value_offsets[row_group_idx];
 
   // Decode with single warp thread until the value is found or we reach the end of the page
@@ -240,6 +245,9 @@ __global__ void build_string_dictionaries(PageInfo const* pages,
       // Otherwise, keep going
       buffer_offset += string_length;
       decoded_values++;
+
+      // Break if an error has been set
+      if (is_error_set()) { break; }
     }
   }
 }
@@ -306,9 +314,6 @@ build_fixed_width_dictionaries(PageInfo const* pages,
 
   for (auto value_idx = group.thread_rank(); value_idx < page.num_input_values;
        value_idx += group.num_threads()) {
-    // Return early if an error has been set
-    if (is_error_set()) { return; }
-
     auto const insert_key = static_cast<key_type>(value_offset + value_idx);
     if constexpr (cuda::std::is_same_v<T, cudf::string_view>) {
       // Parquet physical type must be fixed length so either INT96 or FIXED_LEN_BYTE_ARRAY
@@ -339,6 +344,8 @@ build_fixed_width_dictionaries(PageInfo const* pages,
         &decoded_data[value_offset + value_idx], page_data + (value_idx * sizeof(T)), sizeof(T));
       set_insert_ref.insert(insert_key);
     }
+    // Return early if an error has been set
+    if (is_error_set()) { return; }
   }
 }
 
@@ -388,14 +395,6 @@ __global__ void evaluate_some_string_literals(PageInfo const* pages,
     auto buffer_offset  = 0;
     auto decoded_values = 0;
     while (buffer_offset < page_data_size) {
-      // Return early if we have found all literals
-      if (thrust::all_of(thrust::seq,
-                         thrust::counting_iterator(0),
-                         thrust::counting_iterator(total_num_scalars),
-                         [&](auto scalar_idx) { return results[scalar_idx][row_group_idx]; })) {
-        break;
-      }
-
       // Check for errors
       if (decoded_values > page.num_input_values or
           is_stream_overrun(buffer_offset, sizeof(int32_t))) {
@@ -425,6 +424,14 @@ __global__ void evaluate_some_string_literals(PageInfo const* pages,
       // Otherwise, keep going
       buffer_offset += string_length;
       decoded_values++;
+
+      // Break if we have found all literals
+      if (thrust::all_of(thrust::seq,
+                         thrust::counting_iterator(0),
+                         thrust::counting_iterator(total_num_scalars),
+                         [&](auto scalar_idx) { return results[scalar_idx][row_group_idx]; })) {
+        break;
+      }
     }
   }
 }
@@ -476,15 +483,6 @@ evaluate_some_fixed_width_literals(PageInfo const* pages,
 
   for (auto value_idx = group.thread_rank(); value_idx < page.num_input_values;
        value_idx += group.num_threads()) {
-    // If we have already found matches or error, return early
-    if (is_error_set() or
-        thrust::all_of(thrust::seq,
-                       thrust::counting_iterator(0),
-                       thrust::counting_iterator(total_num_scalars),
-                       [&](auto scalar_idx) { return results[scalar_idx][row_group_idx]; })) {
-      return;
-    }
-
     // Placeholder for the decoded value
     auto decoded_value = T{};
 
@@ -523,6 +521,15 @@ evaluate_some_fixed_width_literals(PageInfo const* pages,
       if (decoded_value == scalars[scalar_idx].value<T>()) {
         results[scalar_idx][row_group_idx] = true;
       }
+    }
+
+    // If we have already found matches or error, return early
+    if (is_error_set() or
+        thrust::all_of(thrust::seq,
+                       thrust::counting_iterator(0),
+                       thrust::counting_iterator(total_num_scalars),
+                       [&](auto scalar_idx) { return results[scalar_idx][row_group_idx]; })) {
+      return;
     }
   }
 }
