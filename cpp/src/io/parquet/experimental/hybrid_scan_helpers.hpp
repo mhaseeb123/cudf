@@ -72,7 +72,7 @@ class aggregate_reader_metadata : public aggregate_reader_metadata_base {
    *
    * @return A pair of filtered row group indices if any is filtered.
    */
-  [[nodiscard]] std::optional<std::vector<std::vector<size_type>>> apply_dictionary_filter(
+  [[nodiscard]] std::optional<std::vector<std::vector<cudf::size_type>>> apply_dictionary_filter(
     cudf::detail::hostdevice_span<parquet::detail::ColumnChunkDesc const> chunks,
     cudf::detail::hostdevice_span<parquet::detail::PageInfo const> pages,
     host_span<std::vector<size_type> const> input_row_group_indices,

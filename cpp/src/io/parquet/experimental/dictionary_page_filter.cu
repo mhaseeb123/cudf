@@ -155,7 +155,9 @@ query_dictionaries(cudf::device_span<T> decoded_data,
         literal_value  = probe_key;
       }
     }
-    result[set_idx] = set_find_ref.contains(literal_value);
+    result[set_idx] = operators[scalar_idx] == ast::ast_operator::NOT_EQUAL
+                        ? not set_find_ref.contains(literal_value)
+                        : set_find_ref.contains(literal_value);
   }
 }
 
@@ -375,10 +377,10 @@ __global__ void evaluate_some_string_literals(PageInfo const* pages,
   if (page.num_input_values == 0 or page_data_size == 0) {
     if (warp.thread_rank() == 0 and row_group_idx < total_row_groups) {
       for (auto i = 0; i < total_num_scalars; ++i) {
-        results[i][row_group_idx] = false;
+        results[i][row_group_idx] = operators[i] == ast::ast_operator::EQUAL;
       }
-      return;
     }
+    return;
   }
 
   // Helper to check data stream overrun
@@ -400,8 +402,8 @@ __global__ void evaluate_some_string_literals(PageInfo const* pages,
     for (auto i = 0; i < total_num_scalars; ++i) {
       results[i][row_group_idx] = false;
     }
-    auto buffer_offset  = 0;
-    auto decoded_values = 0;
+    int32_t buffer_offset          = 0;
+    cudf::size_type decoded_values = 0;
     while (buffer_offset < page_data_size) {
       // Check for errors
       if (decoded_values > page.num_input_values or
@@ -427,7 +429,9 @@ __global__ void evaluate_some_string_literals(PageInfo const* pages,
       // early
       for (auto scalar_idx = 0; scalar_idx < total_num_scalars; ++scalar_idx) {
         if (decoded_value == scalars[scalar_idx].value<cudf::string_view>()) {
-          results[scalar_idx][row_group_idx] = true;
+          results[scalar_idx][row_group_idx] = operators[scalar_idx] == ast::ast_operator::NOT_EQUAL
+                                                 ? page.num_input_values == 1
+                                                 : true;
         }
       }
       // Otherwise, keep going
@@ -534,7 +538,8 @@ evaluate_some_fixed_width_literals(PageInfo const* pages,
     // If the decoded value is equal to the scalar value, set the result to true and return early
     for (auto scalar_idx = 0; scalar_idx < total_num_scalars; ++scalar_idx) {
       if (decoded_value == scalars[scalar_idx].value<T>()) {
-        results[scalar_idx][row_group_idx] = true;
+        results[scalar_idx][row_group_idx] =
+          operators[scalar_idx] == ast::ast_operator::NOT_EQUAL ? page.num_input_values == 1 : true;
       }
     }
 
@@ -988,7 +993,7 @@ class dictionary_expression_converter : public equality_literals_collector {
 
 }  // namespace
 
-std::optional<std::vector<std::vector<size_type>>>
+std::optional<std::vector<std::vector<cudf::size_type>>>
 aggregate_reader_metadata::apply_dictionary_filter(
   cudf::detail::hostdevice_span<parquet::detail::ColumnChunkDesc const> chunks,
   cudf::detail::hostdevice_span<parquet::detail::PageInfo const> pages,
