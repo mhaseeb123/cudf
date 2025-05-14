@@ -116,6 +116,7 @@ query_dictionaries(cudf::device_span<T> decoded_data,
                    ast::ast_operator const* operators,
                    bucket_type* const set_storage,
                    cudf::size_type const* set_offsets,
+                   cudf::size_type const* value_offsets,
                    cudf::size_type total_row_groups,
                    parquet::Type physical_type)
 {
@@ -145,9 +146,9 @@ query_dictionaries(cudf::device_span<T> decoded_data,
                                              cuco::thread_scope_block,
                                              storage_ref};
 
-    auto set_find_ref  = hash_set_ref.rebind_operators(cuco::contains);
-    auto literal_value = scalar.value<T>();
-
+    auto set_find_ref         = hash_set_ref.rebind_operators(cuco::contains);
+    auto literal_value        = scalar.value<T>();
+    auto const num_set_values = value_offsets[set_idx + 1] - value_offsets[set_idx];
     if constexpr (std::is_same_v<T, cudf::string_view>) {
       if (physical_type == parquet::Type::INT96) {
         auto const int128_key = static_cast<__int128_t>(scalar.value<int64_t>());
@@ -155,9 +156,12 @@ query_dictionaries(cudf::device_span<T> decoded_data,
         literal_value  = probe_key;
       }
     }
-    result[set_idx] = operators[scalar_idx] == ast::ast_operator::NOT_EQUAL
-                        ? not set_find_ref.contains(literal_value)
-                        : set_find_ref.contains(literal_value);
+
+    if (operators[scalar_idx] == ast::ast_operator::NOT_EQUAL) {
+      result[set_idx] = num_set_values == 1 and set_find_ref.contains(literal_value);
+    } else {
+      result[set_idx] = set_find_ref.contains(literal_value);
+    }
   }
 }
 
@@ -442,7 +446,12 @@ __global__ void evaluate_some_string_literals(PageInfo const* pages,
       if (thrust::all_of(thrust::seq,
                          thrust::counting_iterator(0),
                          thrust::counting_iterator(total_num_scalars),
-                         [&](auto scalar_idx) { return results[scalar_idx][row_group_idx]; })) {
+                         [&](auto scalar_idx) {
+                           return operators[scalar_idx] == ast::ast_operator::NOT_EQUAL
+                                    ? page.num_input_values > 1 or
+                                        results[scalar_idx][row_group_idx]
+                                    : results[scalar_idx][row_group_idx];
+                         })) {
         break;
       }
     }
@@ -548,7 +557,11 @@ evaluate_some_fixed_width_literals(PageInfo const* pages,
         thrust::all_of(thrust::seq,
                        thrust::counting_iterator(0),
                        thrust::counting_iterator(total_num_scalars),
-                       [&](auto scalar_idx) { return results[scalar_idx][row_group_idx]; })) {
+                       [&](auto scalar_idx) {
+                         return operators[scalar_idx] == ast::ast_operator::NOT_EQUAL
+                                  ? page.num_input_values > 1 or results[scalar_idx][row_group_idx]
+                                  : results[scalar_idx][row_group_idx];
+                       })) {
       return;
     }
   }
@@ -684,6 +697,7 @@ struct dictionary_caster {
                                                                       d_operators.data(),
                                                                       set_storage.data(),
                                                                       set_offsets.data(),
+                                                                      value_offsets.data(),
                                                                       total_row_groups,
                                                                       physical_type);
     } else {
@@ -717,6 +731,7 @@ struct dictionary_caster {
                                                                         d_operators.data(),
                                                                         set_storage.data(),
                                                                         set_offsets.data(),
+                                                                        value_offsets.data(),
                                                                         total_row_groups,
                                                                         physical_type);
       } else {
@@ -749,6 +764,7 @@ struct dictionary_caster {
                                                                         d_operators.data(),
                                                                         set_storage.data(),
                                                                         set_offsets.data(),
+                                                                        value_offsets.data(),
                                                                         total_row_groups,
                                                                         physical_type);
       }

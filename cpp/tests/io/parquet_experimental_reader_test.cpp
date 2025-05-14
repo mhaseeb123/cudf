@@ -591,7 +591,7 @@ TEST_F(ParquetExperimentalReaderTest, PrunePagesOnly)
   }
 }
 
-TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
+TEST_F(ParquetExperimentalReaderTest, TestFilterRowGroupWithDictionary)
 {
   srand(31337);
 
@@ -609,8 +609,7 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
     cudf::host_span<uint8_t const>(reinterpret_cast<uint8_t const*>(buffer.data()), buffer.size());
 
   // Lambda to filter row groups with dictionaries
-  auto const filter_row_groups_with_dictionaries = [&](auto const& filter_expression,
-                                                       cudf::size_type expected_row_groups) {
+  auto const filter_row_groups_with_dictionaries = [&](auto const& filter_expression) {
     // Create reader options with empty source info
     cudf::io::parquet_reader_options options =
       cudf::io::parquet_reader_options::builder().filter(filter_expression);
@@ -656,167 +655,238 @@ TEST_F(ParquetExperimentalReaderTest, PruneRowGroupsWithDictionary)
       current_row_group_indices = dictionary_page_filtered_row_group_indices;
     }
 
-    EXPECT_EQ(current_row_group_indices.size(), expected_row_groups);
+    return current_row_group_indices;
   };
 
   {
-    // Filtering - table[0] != 50 AND table[2] == 0099
-    auto uint32_literal_value = cudf::numeric_scalar<uint32_t>(50);
-    auto uint32_literal       = cudf::ast::literal(uint32_literal_value);
-    auto uint32_col_ref_0     = cudf::ast::column_name_reference("col_uint32");
-    auto uint32_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint32_col_ref_0, uint32_literal);
-
-    auto string_literal_value = cudf::string_scalar("0099");
-    auto string_literal       = cudf::ast::literal(string_literal_value);
-    auto string_col_ref_0     = cudf::ast::column_name_reference("col_str");
-    auto string_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, string_col_ref_0, string_literal);
-    auto filter_expression = cudf::ast::operation(
-      cudf::ast::ast_operator::LOGICAL_AND, uint32_filter_expression, string_filter_expression);
-
-    constexpr cudf::size_type expected_row_groups = 4;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
-  }
-
-  {
-    // Filtering - table[0] != 50 and table[0] != 100
-    auto uint32_literal_value  = cudf::numeric_scalar<uint32_t>(50);
-    auto uint32_literal_value2 = cudf::numeric_scalar<uint32_t>(100);
-    auto uint32_literal        = cudf::ast::literal(uint32_literal_value);
-    auto uint32_literal2       = cudf::ast::literal(uint32_literal_value2);
-    auto uint32_col_ref_0      = cudf::ast::column_name_reference("col_uint32");
-    auto uint32_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint32_col_ref_0, uint32_literal);
-    auto uint32_filter_expression2 =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint32_col_ref_0, uint32_literal2);
-    auto filter_expression = cudf::ast::operation(
-      cudf::ast::ast_operator::LOGICAL_AND, uint32_filter_expression, uint32_filter_expression2);
-
-    constexpr cudf::size_type expected_row_groups = 4;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
-  }
-
-  {
     // Filtering - table[0] != 1000
-    auto uint32_literal_value = cudf::numeric_scalar<uint32_t>(1000);
-    auto uint32_literal       = cudf::ast::literal(uint32_literal_value);
-    auto uint32_col_ref_0     = cudf::ast::column_name_reference("col_uint32");
+    auto uint_literal_value = cudf::numeric_scalar<uint32_t>(1000);
+    auto uint_literal       = cudf::ast::literal(uint_literal_value);
+    auto uint_col_ref       = cudf::ast::column_name_reference("col_uint32");
     auto filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint32_col_ref_0, uint32_literal);
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal);
     constexpr cudf::size_type expected_row_groups = 4;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
   }
 
   {
-    // Filtering - table[0] != 50 and table[0] == 50
-    auto uint32_literal_value  = cudf::numeric_scalar<uint32_t>(50);
-    auto uint32_literal_value2 = cudf::numeric_scalar<uint32_t>(50);
-    auto uint32_literal        = cudf::ast::literal(uint32_literal_value);
-    auto uint32_literal2       = cudf::ast::literal(uint32_literal_value2);
-    auto uint32_col_ref_0      = cudf::ast::column_name_reference("col_uint32");
-    auto uint32_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint32_col_ref_0, uint32_literal);
-    auto uint32_filter_expression2 =
-      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal2);
-    auto filter_expression = cudf::ast::operation(
-      cudf::ast::ast_operator::LOGICAL_AND, uint32_filter_expression, uint32_filter_expression2);
-
-    constexpr cudf::size_type expected_row_groups = 1;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
-  }
-
-  {
-    // Filtering - table[0] == 50 or table[0] == 100 or table[0] == 150
-    auto uint32_literal_value  = cudf::numeric_scalar<uint32_t>(50);
-    auto uint32_literal_value2 = cudf::numeric_scalar<uint32_t>(100);
-    auto uint32_literal_value3 = cudf::numeric_scalar<uint32_t>(150);
-    auto uint32_literal        = cudf::ast::literal(uint32_literal_value);
-    auto uint32_literal2       = cudf::ast::literal(uint32_literal_value2);
-    auto uint32_literal3       = cudf::ast::literal(uint32_literal_value3);
-    auto uint32_col_ref_0      = cudf::ast::column_name_reference("col_uint32");
-    auto uint32_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal);
-    auto uint32_filter_expression2 =
-      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal2);
-    auto uint32_filter_expression3 =
-      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint32_col_ref_0, uint32_literal3);
-    auto filter_expression_x = cudf::ast::operation(
-      cudf::ast::ast_operator::LOGICAL_OR, uint32_filter_expression, uint32_filter_expression2);
-    auto filter_expression = cudf::ast::operation(
-      cudf::ast::ast_operator::LOGICAL_OR, filter_expression_x, uint32_filter_expression3);
-
-    constexpr cudf::size_type expected_row_groups = 3;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
-  }
-
-  {
-    // Filtering - table[2] != 0099 or table[2] != 0100
-    auto string_literal_value  = cudf::string_scalar("0099");  // in all row groups
-    auto string_literal_value2 = cudf::string_scalar("0100");  // in no row group
-    auto string_literal        = cudf::ast::literal(string_literal_value);
-    auto string_literal2       = cudf::ast::literal(string_literal_value2);
-    auto string_col_ref_0      = cudf::ast::column_name_reference("col_str");
-    auto string_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, string_col_ref_0, string_literal);
-    auto string_filter_expression2 =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, string_col_ref_0, string_literal2);
-    auto filter_expression = cudf::ast::operation(
-      cudf::ast::ast_operator::LOGICAL_OR, string_filter_expression, string_filter_expression2);
-
-    constexpr cudf::size_type expected_row_groups = 4;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
+    // Filtering - table[0] == 1000
+    auto uint_literal_value = cudf::numeric_scalar<uint32_t>(1000);
+    auto uint_literal       = cudf::ast::literal(uint_literal_value);
+    auto uint_col_ref       = cudf::ast::column_name_reference("col_uint32");
+    auto filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint_col_ref, uint_literal);
+    constexpr cudf::size_type expected_row_groups = 0;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
   }
 
   {
     // Filtering - table[2] != 0099
-    auto string_literal_value = cudf::string_scalar("0099");  // in all row groups
-    auto string_literal       = cudf::ast::literal(string_literal_value);
-    auto string_col_ref_0     = cudf::ast::column_name_reference("col_str");
+    auto str_literal_value = cudf::string_scalar("0099");  // in all row groups
+    auto str_literal       = cudf::ast::literal(str_literal_value);
+    auto str_col_ref       = cudf::ast::column_name_reference("col_str");
     auto filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, string_col_ref_0, string_literal);
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, str_col_ref, str_literal);
 
     constexpr cudf::size_type expected_row_groups = 0;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
+  }
+
+  {
+    // Filtering - table[2] == 0099
+    auto str_literal_value = cudf::string_scalar("0099");  // in all row groups
+    auto str_literal       = cudf::ast::literal(str_literal_value);
+    auto str_col_ref       = cudf::ast::column_name_reference("col_str");
+    auto filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, str_col_ref, str_literal);
+
+    constexpr cudf::size_type expected_row_groups = 4;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
+  }
+
+  {
+    // Filtering - table[0] != 50 AND table[2] == 0099
+    auto uint_literal_value = cudf::numeric_scalar<uint32_t>(50);
+    auto uint_literal       = cudf::ast::literal(uint_literal_value);
+    auto uint_col_ref       = cudf::ast::column_name_reference("col_uint32");
+    auto uint_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal);
+
+    auto str_literal_value = cudf::string_scalar("0099");
+    auto str_literal       = cudf::ast::literal(str_literal_value);
+    auto str_col_ref       = cudf::ast::column_name_reference("col_str");
+    auto str_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, str_col_ref, str_literal);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_AND, uint_filter_expression, str_filter_expression);
+
+    constexpr cudf::size_type expected_row_groups = 4;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
+  }
+
+  {
+    // Filtering -  table[0] != 50 and table[0] != 100
+    auto uint_literal_value  = cudf::numeric_scalar<uint32_t>(50);
+    auto uint_literal_value2 = cudf::numeric_scalar<uint32_t>(100);
+    auto uint_literal        = cudf::ast::literal(uint_literal_value);
+    auto uint_literal2       = cudf::ast::literal(uint_literal_value2);
+    auto uint_col_ref        = cudf::ast::column_name_reference("col_uint32");
+    auto uint_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal);
+    auto uint_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_AND, uint_filter_expression, uint_filter_expression2);
+
+    constexpr cudf::size_type expected_row_groups = 4;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
+  }
+
+  {
+    // Filtering - table[0] != 50 and table[0] == 50
+    auto uint_literal_value  = cudf::numeric_scalar<uint32_t>(50);
+    auto uint_literal_value2 = cudf::numeric_scalar<uint32_t>(50);
+    auto uint_literal        = cudf::ast::literal(uint_literal_value);
+    auto uint_literal2       = cudf::ast::literal(uint_literal_value2);
+    auto uint_col_ref        = cudf::ast::column_name_reference("col_uint32");
+    auto uint_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal);
+    auto uint_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint_col_ref, uint_literal2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_AND, uint_filter_expression, uint_filter_expression2);
+
+    constexpr cudf::size_type expected_row_groups = 1;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
+  }
+
+  {
+    // Filtering - table[2] != 0099 or table[2] != 0100
+    auto str_literal_value  = cudf::string_scalar("0099");  // in all row groups
+    auto str_literal_value2 = cudf::string_scalar("0100");  // in no row group
+    auto str_literal        = cudf::ast::literal(str_literal_value);
+    auto str_literal2       = cudf::ast::literal(str_literal_value2);
+    auto str_col_ref        = cudf::ast::column_name_reference("col_str");
+    auto str_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, str_col_ref, str_literal);
+    auto str_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, str_col_ref, str_literal2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_OR, str_filter_expression, str_filter_expression2);
+
+    constexpr cudf::size_type expected_row_groups = 4;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
   }
 
   {
     // Filtering - table[0] != 50 or table[2] != 0099
-    auto uint32_literal_value = cudf::numeric_scalar<uint32_t>(50);
-    auto uint32_literal       = cudf::ast::literal(uint32_literal_value);
-    auto uint32_col_ref_0     = cudf::ast::column_name_reference("col_uint32");
-    auto uint32_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint32_col_ref_0, uint32_literal);
+    auto uint_literal_value = cudf::numeric_scalar<uint32_t>(50);
+    auto uint_literal       = cudf::ast::literal(uint_literal_value);
+    auto uint_col_ref       = cudf::ast::column_name_reference("col_uint32");
+    auto uint_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal);
 
-    auto string_literal_value = cudf::string_scalar("0099");
-    auto string_literal       = cudf::ast::literal(string_literal_value);
-    auto string_col_ref_0     = cudf::ast::column_name_reference("col_str");
-    auto string_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, string_col_ref_0, string_literal);
+    auto str_literal_value = cudf::string_scalar("0099");
+    auto str_literal       = cudf::ast::literal(str_literal_value);
+    auto str_col_ref       = cudf::ast::column_name_reference("col_str");
+    auto str_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, str_col_ref, str_literal);
     auto filter_expression = cudf::ast::operation(
-      cudf::ast::ast_operator::LOGICAL_OR, uint32_filter_expression, string_filter_expression);
+      cudf::ast::ast_operator::LOGICAL_OR, uint_filter_expression, str_filter_expression);
 
     constexpr cudf::size_type expected_row_groups = 4;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
   }
 
   {
     // Filtering - table[0] != 50 and table[2] != 0099
-    auto uint32_literal_value = cudf::numeric_scalar<uint32_t>(50);
-    auto uint32_literal       = cudf::ast::literal(uint32_literal_value);
-    auto uint32_col_ref_0     = cudf::ast::column_name_reference("col_uint32");
-    auto uint32_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint32_col_ref_0, uint32_literal);
+    auto uint_literal_value = cudf::numeric_scalar<uint32_t>(50);
+    auto uint_literal       = cudf::ast::literal(uint_literal_value);
+    auto uint_col_ref       = cudf::ast::column_name_reference("col_uint32");
+    auto uint_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal);
 
-    auto string_literal_value = cudf::string_scalar("0099");
-    auto string_literal       = cudf::ast::literal(string_literal_value);
-    auto string_col_ref_0     = cudf::ast::column_name_reference("col_str");
-    auto string_filter_expression =
-      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, string_col_ref_0, string_literal);
+    auto str_literal_value = cudf::string_scalar("0099");
+    auto str_literal       = cudf::ast::literal(str_literal_value);
+    auto str_col_ref       = cudf::ast::column_name_reference("col_str");
+    auto str_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, str_col_ref, str_literal);
     auto filter_expression = cudf::ast::operation(
-      cudf::ast::ast_operator::LOGICAL_AND, uint32_filter_expression, string_filter_expression);
+      cudf::ast::ast_operator::LOGICAL_AND, uint_filter_expression, str_filter_expression);
 
     constexpr cudf::size_type expected_row_groups = 0;
-    filter_row_groups_with_dictionaries(filter_expression, expected_row_groups);
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
+  }
+
+  {
+    // Filtering - table[0] == 50 or table[0] == 100 or table[0] == 150
+    auto uint_literal_value  = cudf::numeric_scalar<uint32_t>(50);
+    auto uint_literal_value2 = cudf::numeric_scalar<uint32_t>(100);
+    auto uint_literal_value3 = cudf::numeric_scalar<uint32_t>(150);
+    auto uint_literal        = cudf::ast::literal(uint_literal_value);
+    auto uint_literal2       = cudf::ast::literal(uint_literal_value2);
+    auto uint_literal3       = cudf::ast::literal(uint_literal_value3);
+    auto uint_col_ref        = cudf::ast::column_name_reference("col_uint32");
+    auto uint_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint_col_ref, uint_literal);
+    auto uint_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint_col_ref, uint_literal2);
+    auto uint_filter_expression3 =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, uint_col_ref, uint_literal3);
+    auto composed_filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_OR, uint_filter_expression, uint_filter_expression2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_OR, composed_filter_expression, uint_filter_expression3);
+
+    constexpr cudf::size_type expected_row_groups = 3;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
+  }
+
+  {
+    // Filtering - table[0] != 50 or table[0] != 100 or table[0] != 150
+    auto uint_literal_value  = cudf::numeric_scalar<uint32_t>(50);
+    auto uint_literal_value2 = cudf::numeric_scalar<uint32_t>(100);
+    auto uint_literal_value3 = cudf::numeric_scalar<uint32_t>(150);
+    auto uint_literal        = cudf::ast::literal(uint_literal_value);
+    auto uint_literal2       = cudf::ast::literal(uint_literal_value2);
+    auto uint_literal3       = cudf::ast::literal(uint_literal_value3);
+    auto uint_col_ref        = cudf::ast::column_name_reference("col_uint32");
+    auto uint_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal);
+    auto uint_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal2);
+    auto uint_filter_expression3 =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, uint_col_ref, uint_literal3);
+    auto composed_filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_OR, uint_filter_expression, uint_filter_expression2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_OR, composed_filter_expression, uint_filter_expression3);
+
+    constexpr cudf::size_type expected_row_groups = 4;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
+  }
+
+  {
+    // Filtering - table[2] != 0099 and table[2] != 0100 and table[2] != 0150
+    auto str_literal_value  = cudf::string_scalar("0099");
+    auto str_literal_value2 = cudf::string_scalar("0100");
+    auto str_literal_value3 = cudf::string_scalar("0150");
+    auto str_literal        = cudf::ast::literal(str_literal_value);
+    auto str_literal2       = cudf::ast::literal(str_literal_value2);
+    auto str_literal3       = cudf::ast::literal(str_literal_value3);
+    auto str_col_ref        = cudf::ast::column_name_reference("col_str");
+    auto str_filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, str_col_ref, str_literal);
+    auto str_filter_expression2 =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, str_col_ref, str_literal2);
+    auto str_filter_expression3 =
+      cudf::ast::operation(cudf::ast::ast_operator::NOT_EQUAL, str_col_ref, str_literal3);
+    auto composed_filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_AND, str_filter_expression, str_filter_expression2);
+    auto filter_expression = cudf::ast::operation(
+      cudf::ast::ast_operator::LOGICAL_AND, composed_filter_expression, str_filter_expression3);
+
+    constexpr cudf::size_type expected_row_groups = 0;
+    EXPECT_EQ(filter_row_groups_with_dictionaries(filter_expression).size(), expected_row_groups);
   }
 }
