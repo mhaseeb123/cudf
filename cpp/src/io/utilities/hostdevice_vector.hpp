@@ -114,7 +114,9 @@ class hostdevice_vector {
    */
   [[nodiscard]] T element(std::size_t element_index, rmm::cuda_stream_view stream) const
   {
-    return d_data.element(element_index, stream);
+    // copy d_data.element[element_index] to a host vector and return the first element
+    return make_host_vector<T>(cudf::device_span<T>{d_data.element_ptr(element_index), 1}, stream)
+      .front();
   }
 
   operator cudf::host_span<T>() { return host_span<T>{h_data}.subspan(0, size()); }
