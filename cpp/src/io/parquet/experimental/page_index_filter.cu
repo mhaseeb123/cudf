@@ -56,186 +56,6 @@ using stats_caster_base = parquet::detail::stats_caster_base;
 using string_index_pair = parquet::detail::string_index_pair;
 
 namespace {
-/**
- * @brief Make a device vector where each row contains the index of the page it belongs to
- */
-[[nodiscard]] rmm::device_uvector<size_type> make_page_indices_async(
-  cudf::host_span<cudf::size_type const> page_row_counts,
-  cudf::host_span<cudf::size_type const> page_row_offsets,
-  cudf::size_type total_rows,
-  rmm::cuda_stream_view stream)
-{
-  auto mr = cudf::get_current_device_resource_ref();
-
-  // Copy page-level row counts and offsets to device
-  auto row_counts  = cudf::detail::make_device_uvector_async(page_row_counts, stream, mr);
-  auto row_offsets = cudf::detail::make_device_uvector_async(page_row_offsets, stream, mr);
-
-  // Make a zeroed device vector to store page indices of each row
-  auto page_indices =
-    cudf::detail::make_zeroed_device_uvector_async<cudf::size_type>(total_rows, stream, mr);
-
-  // Scatter page indices across the their first row's index
-  thrust::scatter_if(rmm::exec_policy_nosync(stream),
-                     thrust::counting_iterator<size_type>(0),
-                     thrust::counting_iterator<size_type>(row_counts.size()),
-                     row_offsets.begin(),
-                     row_counts.begin(),
-                     page_indices.begin());
-
-  // Inclusive scan with maximum to replace zeros with the (increasing) page index it belongs to.
-  // Page indices are scattered at their first row's index.
-  thrust::inclusive_scan(rmm::exec_policy_nosync(stream),
-                         page_indices.begin(),
-                         page_indices.end(),
-                         page_indices.begin(),
-                         cuda::maximum<cudf::size_type>());
-  return page_indices;
-}
-
-/**
- * @brief Compute page row counts and page row offsets and column chunk page (count) offsets for a
- * given column schema index
- */
-[[nodiscard]] auto make_page_row_counts_and_offsets(
-  cudf::host_span<metadata_base const> per_file_metadata,
-  cudf::host_span<std::vector<size_type> const> row_group_indices,
-  size_type schema_idx,
-  rmm::cuda_stream_view stream)
-{
-  // Compute total number of row groups
-  auto const total_row_groups =
-    std::accumulate(row_group_indices.begin(),
-                    row_group_indices.end(),
-                    size_t{0},
-                    [](auto sum, auto const& rg_indices) { return sum + rg_indices.size(); });
-
-  // Vector to store how many rows are present in each page - set initial capacity to two data pages
-  // per row group
-  auto page_row_counts =
-    cudf::detail::make_empty_host_vector<size_type>(2 * total_row_groups, stream);
-  // Vector to store the cumulative number of rows in each page - - set initial capacity to two data
-  // pages per row group
-  auto page_row_offsets =
-    cudf::detail::make_empty_host_vector<size_type>((2 * total_row_groups) + 1, stream);
-  // Vector to store the cumulative number of pages in each column chunk
-  auto col_chunk_page_offsets =
-    cudf::detail::make_empty_host_vector<size_type>(total_row_groups + 1, stream);
-
-  page_row_offsets.push_back(0);
-  col_chunk_page_offsets.push_back(0);
-
-  // For all data sources
-  std::for_each(
-    thrust::counting_iterator<size_t>(0),
-    thrust::counting_iterator(row_group_indices.size()),
-    [&](auto src_idx) {
-      auto const& rg_indices = row_group_indices[src_idx];
-      // For all column chunks in this data source
-      std::for_each(rg_indices.cbegin(), rg_indices.cend(), [&](auto rg_idx) {
-        auto const& row_group = per_file_metadata[src_idx].row_groups[rg_idx];
-        // Find the column chunk with the given schema index
-        auto colchunk_iter = std::find_if(
-          row_group.columns.begin(), row_group.columns.end(), [schema_idx](ColumnChunk const& col) {
-            return col.schema_idx == schema_idx;
-          });
-
-        CUDF_EXPECTS(colchunk_iter != row_group.columns.end(),
-                     "Column chunk with schema index " + std::to_string(schema_idx) +
-                       " not found in row group",
-                     std::invalid_argument);
-
-        // Compute page row counts and offsets if this column chunk has column and offset indexes
-        if (colchunk_iter->offset_index.has_value()) {
-          CUDF_EXPECTS(colchunk_iter->column_index.has_value(),
-                       "Both offset and column indexes must be present");
-          // Get the offset and column indexes of the column chunk
-          auto const& offset_index = colchunk_iter->offset_index.value();
-          auto const& column_index = colchunk_iter->column_index.value();
-
-          // Number of pages in this column chunk
-          auto const row_group_num_pages = offset_index.page_locations.size();
-
-          CUDF_EXPECTS(column_index.min_values.size() == column_index.max_values.size(),
-                       "page min and max values should be of same size");
-          CUDF_EXPECTS(column_index.min_values.size() == row_group_num_pages,
-                       "mismatch between size of min/max page values and the size of page "
-                       "locations");
-          // Update the cumulative number of pages in this column chunk
-          col_chunk_page_offsets.push_back(col_chunk_page_offsets.back() + row_group_num_pages);
-
-          // For all pages in this column chunk, update page row counts and offsets.
-          std::for_each(
-            thrust::counting_iterator<size_t>(0),
-            thrust::counting_iterator(row_group_num_pages),
-            [&](auto const page_idx) {
-              int64_t const first_row_idx = offset_index.page_locations[page_idx].first_row_index;
-              // For the last page, this is simply the total number of rows in the column chunk
-              int64_t const last_row_idx =
-                (page_idx < row_group_num_pages - 1)
-                  ? offset_index.page_locations[page_idx + 1].first_row_index
-                  : row_group.num_rows;
-
-              // Update the page row counts and offsets
-              page_row_counts.push_back(last_row_idx - first_row_idx);
-              page_row_offsets.push_back(page_row_offsets.back() + page_row_counts.back());
-            });
-        }
-      });
-    });
-
-  return std::tuple{
-    std::move(page_row_counts), std::move(page_row_offsets), std::move(col_chunk_page_offsets)};
-}
-
-/**
- * @brief Compute if the page index is present in all parquet data sources for all columns
- */
-[[nodiscard]] bool compute_has_page_index(
-  cudf::host_span<metadata_base const> file_metadatas,
-  cudf::host_span<std::vector<size_type> const> row_group_indices,
-  cudf::host_span<size_type const> column_schema_indices)
-{
-  // For all output columns, check all parquet data sources
-  return std::all_of(
-    column_schema_indices.begin(), column_schema_indices.end(), [&](auto const schema_idx) {
-      // For all parquet data sources
-      return std::all_of(
-        thrust::counting_iterator<size_t>(0),
-        thrust::counting_iterator(row_group_indices.size()),
-        [&](auto const src_index) {
-          // For all row groups in this parquet data source
-          auto const& rg_indices = row_group_indices[src_index];
-          return std::all_of(rg_indices.begin(), rg_indices.end(), [&](auto const& rg_index) {
-            auto const& row_group = file_metadatas[src_index].row_groups[rg_index];
-            auto col              = std::find_if(
-              row_group.columns.begin(),
-              row_group.columns.end(),
-              [schema_idx](ColumnChunk const& col) { return col.schema_idx == schema_idx; });
-            // Check if the offset_index and column_index are present
-            return col != file_metadatas[src_index].row_groups[rg_index].columns.end() and
-                   col->offset_index.has_value() and col->column_index.has_value();
-          });
-        });
-    });
-}
-
-/**
- * @brief Construct a vector of all required data pages from the page row counts
- */
-[[nodiscard]] auto all_required_data_pages(
-  cudf::host_span<cudf::detail::host_vector<size_type> const> page_row_counts)
-{
-  std::vector<std::vector<bool>> all_required_data_pages;
-  all_required_data_pages.reserve(page_row_counts.size());
-  std::transform(
-    page_row_counts.begin(),
-    page_row_counts.end(),
-    std::back_inserter(all_required_data_pages),
-    [&](auto const& col_page_counts) { return std::vector<bool>(col_page_counts.size(), true); });
-
-  return all_required_data_pages;
-};
 
 /**
  * @brief Converts page-level statistics of a column to 3 device columns - min, max and is_null
@@ -574,416 +394,410 @@ struct page_stats_caster : public stats_caster_base {
                         std::move(max),
                         std::move(is_null)};
     }
+  }
 
-    /**
-     * @brief Builds three device columns storing the corresponding page-level statistics
-     *        (min, max, is_null) respectively of a column at each row index
-     *
-     * @tparam T underlying type of the column
-     * @param schema_idx Column schema index
-     * @param dtype Column data type
-     * @param stream CUDA stream
-     * @param mr Device memory resource
-     *
-     * @return A tuple of device columns with min, max and optionally is_null value from page
-     * statistics for each row
-     */
-    template <typename T>
-    [[nodiscard]] std::tuple<std::unique_ptr<column>,
-                             std::unique_ptr<column>,
-                             std::optional<std::unique_ptr<column>>>
+  /**
+   * @brief Builds three device columns storing the corresponding page-level statistics
+   *        (min, max, is_null) respectively of a column at each row index
+   *
+   * @tparam T underlying type of the column
+   * @param schema_idx Column schema index
+   * @param dtype Column data type
+   * @param stream CUDA stream
+   * @param mr Device memory resource
+   *
+   * @return A tuple of device columns with min, max and optionally is_null value from page
+   * statistics for each row
+   */
+  template <typename T>
+  [[nodiscard]] std::
+    tuple<std::unique_ptr<column>, std::unique_ptr<column>, std::optional<std::unique_ptr<column>>>
     operator()(cudf::size_type schema_idx,
                cudf::data_type dtype,
                rmm::cuda_stream_view stream,
                rmm::device_async_resource_ref mr) const
-    {
-      // List, Struct, Dictionary types are not supported
-      if constexpr (cudf::is_compound<T>() and not cuda::std::is_same_v<T, string_view>) {
-        CUDF_FAIL("Compound types other than strings do not have statistics");
-      } else {
-        // Compute page row counts, row offsets, column chunk page offsets, min, max and optional
-        // is_null stats host columns
-        auto [page_row_counts, page_row_offsets, col_chunk_page_offsets, min, max, is_null] =
-          compute_host_data<T>(schema_idx, dtype, stream);
+  {
+    // List, Struct, Dictionary types are not supported
+    if constexpr (cudf::is_compound<T>() and not cuda::std::is_same_v<T, string_view>) {
+      CUDF_FAIL("Compound types other than strings do not have statistics");
+    } else {
+      // Compute page row counts, row offsets, column chunk page offsets, min, max and optional
+      // is_null stats host columns
+      auto [page_row_counts, page_row_offsets, col_chunk_page_offsets, min, max, is_null] =
+        compute_host_data<T>(schema_idx, dtype, stream);
 
-        // Construct a row indices mapping based on page row counts and offsets
-        auto const page_indices =
-          make_page_indices_async(page_row_counts, page_row_offsets, total_rows, stream);
+      // Construct a row indices mapping based on page row counts and offsets
+      auto const page_indices =
+        make_page_indices_async(page_row_counts, page_row_offsets, total_rows, stream);
 
-        // For non-strings columns, directly gather the page-level column data and bitmask to the
-        // row-level.
-        if constexpr (not cuda::std::is_same_v<T, cudf::string_view>) {
-          // Move host min/max columns to device
-          auto mincol = min.to_device(dtype, stream, cudf::get_current_device_resource_ref());
-          auto maxcol = max.to_device(dtype, stream, cudf::get_current_device_resource_ref());
+      // For non-strings columns, directly gather the page-level column data and bitmask to the
+      // row-level.
+      if constexpr (not cuda::std::is_same_v<T, cudf::string_view>) {
+        // Move host min/max columns to device
+        auto mincol = min.to_device(dtype, stream, cudf::get_current_device_resource_ref());
+        auto maxcol = max.to_device(dtype, stream, cudf::get_current_device_resource_ref());
 
-          // Convert page-level min and max columns to row-level min and max columns by gathering
-          // values based on page-level row offsets
-          auto [min_data, min_nullmask] = build_data_and_nullmask<T>(mincol->mutable_view(),
-                                                                     min.null_mask.data(),
-                                                                     page_indices,
-                                                                     page_row_offsets,
-                                                                     dtype,
-                                                                     stream,
-                                                                     mr);
-          auto [max_data, max_nullmask] = build_data_and_nullmask<T>(maxcol->mutable_view(),
-                                                                     max.null_mask.data(),
-                                                                     page_indices,
-                                                                     page_row_offsets,
-                                                                     dtype,
-                                                                     stream,
-                                                                     mr);
+        // Convert page-level min and max columns to row-level min and max columns by gathering
+        // values based on page-level row offsets
+        auto [min_data, min_nullmask] = build_data_and_nullmask<T>(mincol->mutable_view(),
+                                                                   min.null_mask.data(),
+                                                                   page_indices,
+                                                                   page_row_offsets,
+                                                                   dtype,
+                                                                   stream,
+                                                                   mr);
+        auto [max_data, max_nullmask] = build_data_and_nullmask<T>(maxcol->mutable_view(),
+                                                                   max.null_mask.data(),
+                                                                   page_indices,
+                                                                   page_row_offsets,
+                                                                   dtype,
+                                                                   stream,
+                                                                   mr);
 
-          // Count nulls in min and max columns
-          auto const min_nulls =
-            mincol->null_count()
-              ? cudf::detail::null_count(
-                  reinterpret_cast<bitmask_type*>(min_nullmask.data()), 0, total_rows, stream)
-              : 0;
-          auto const max_nulls =
-            maxcol->null_count()
-              ? cudf::detail::null_count(
-                  reinterpret_cast<bitmask_type*>(max_nullmask.data()), 0, total_rows, stream)
-              : 0;
-          // Return min, max and is_null device columns
-          return {std::make_unique<column>(
-                    dtype, total_rows, std::move(min_data), std::move(min_nullmask), min_nulls),
-                  std::make_unique<column>(
-                    dtype, total_rows, std::move(max_data), std::move(max_nullmask), max_nulls),
-                  has_is_null_operator
-                    ? std::make_optional(build_is_null_device_column(
-                        is_null.value(), page_indices, page_row_offsets, stream, mr))
-                    : std::nullopt};
-        }
-        // For strings columns, gather the page-level string offsets and bitmask to row-level
-        // directly and gather string chars using a batched memcpy.
-        else {
-          auto [min_data, min_offsets, min_nullmask] =
-            build_string_data_and_nullmask(min.val,
-                                           min.chars,
-                                           min.null_mask.data(),
-                                           min.null_count,
-                                           page_indices,
-                                           page_row_offsets,
-                                           stream,
-                                           mr);
-          auto [max_data, max_offsets, max_nullmask] =
-            build_string_data_and_nullmask(max.val,
-                                           max.chars,
-                                           max.null_mask.data(),
-                                           max.null_count,
-                                           page_indices,
-                                           page_row_offsets,
-                                           stream,
-                                           mr);
+        // Count nulls in min and max columns
+        auto const min_nulls =
+          mincol->null_count()
+            ? cudf::detail::null_count(
+                reinterpret_cast<bitmask_type*>(min_nullmask.data()), 0, total_rows, stream)
+            : 0;
+        auto const max_nulls =
+          maxcol->null_count()
+            ? cudf::detail::null_count(
+                reinterpret_cast<bitmask_type*>(max_nullmask.data()), 0, total_rows, stream)
+            : 0;
+        // Return min, max and is_null device columns
+        return {std::make_unique<column>(
+                  dtype, total_rows, std::move(min_data), std::move(min_nullmask), min_nulls),
+                std::make_unique<column>(
+                  dtype, total_rows, std::move(max_data), std::move(max_nullmask), max_nulls),
+                has_is_null_operator
+                  ? std::make_optional(build_is_null_device_column(
+                      is_null.value(), page_indices, page_row_offsets, stream, mr))
+                  : std::nullopt};
+      }
+      // For strings columns, gather the page-level string offsets and bitmask to row-level
+      // directly and gather string chars using a batched memcpy.
+      else {
+        auto [min_data, min_offsets, min_nullmask] =
+          build_string_data_and_nullmask(min.val,
+                                         min.chars,
+                                         min.null_mask.data(),
+                                         min.null_count,
+                                         page_indices,
+                                         page_row_offsets,
+                                         stream,
+                                         mr);
+        auto [max_data, max_offsets, max_nullmask] =
+          build_string_data_and_nullmask(max.val,
+                                         max.chars,
+                                         max.null_mask.data(),
+                                         max.null_count,
+                                         page_indices,
+                                         page_row_offsets,
+                                         stream,
+                                         mr);
 
-          // Count nulls in min and max columns
-          auto const min_nulls =
-            min.null_count
-              ? cudf::detail::null_count(
-                  reinterpret_cast<bitmask_type*>(min_nullmask.data()), 0, total_rows, stream)
-              : 0;
-          auto const max_nulls =
-            max.null_count
-              ? cudf::detail::null_count(
-                  reinterpret_cast<bitmask_type*>(max_nullmask.data()), 0, total_rows, stream)
-              : 0;
+        // Count nulls in min and max columns
+        auto const min_nulls =
+          min.null_count
+            ? cudf::detail::null_count(
+                reinterpret_cast<bitmask_type*>(min_nullmask.data()), 0, total_rows, stream)
+            : 0;
+        auto const max_nulls =
+          max.null_count
+            ? cudf::detail::null_count(
+                reinterpret_cast<bitmask_type*>(max_nullmask.data()), 0, total_rows, stream)
+            : 0;
 
-          // Return min, max and is_null device strings columns
-          return {cudf::make_strings_column(
-                    total_rows,
-                    std::make_unique<column>(
-                      std::move(min_offsets), rmm::device_buffer{0, stream, mr}, 0),
-                    std::move(min_data),
-                    min_nulls,
-                    std::move(min_nullmask)),
-                  cudf::make_strings_column(
-                    total_rows,
-                    std::make_unique<column>(
-                      std::move(max_offsets), rmm::device_buffer{0, stream, mr}, 0),
-                    std::move(max_data),
-                    max_nulls,
-                    std::move(max_nullmask)),
-                  has_is_null_operator
-                    ? std::make_optional(build_is_null_device_column(
-                        is_null.value(), page_indices, page_row_offsets, stream, mr))
-                    : std::nullopt};
-        }
+        // Return min, max and is_null device strings columns
+        return {
+          cudf::make_strings_column(
+            total_rows,
+            std::make_unique<column>(std::move(min_offsets), rmm::device_buffer{0, stream, mr}, 0),
+            std::move(min_data),
+            min_nulls,
+            std::move(min_nullmask)),
+          cudf::make_strings_column(
+            total_rows,
+            std::make_unique<column>(std::move(max_offsets), rmm::device_buffer{0, stream, mr}, 0),
+            std::move(max_data),
+            max_nulls,
+            std::move(max_nullmask)),
+          has_is_null_operator ? std::make_optional(build_is_null_device_column(
+                                   is_null.value(), page_indices, page_row_offsets, stream, mr))
+                               : std::nullopt};
       }
     }
-  };
+  }
+};
 
-  /**
-   * @brief Converts page-level statistics of single column to a surviving row mask device column
-   */
-  struct page_stats_to_row_mask_converter : public page_stats_caster {
-    page_stats_to_row_mask_converter(
-      cudf::size_type total_rows,
-      cudf::host_span<metadata_base const> per_file_metadata,
-      cudf::host_span<std::vector<size_type> const> row_group_indices,
-      bool has_is_null_operator)
-      : page_stats_caster{.total_rows           = total_rows,
-                          .per_file_metadata    = per_file_metadata,
-                          .row_group_indices    = row_group_indices,
-                          .has_is_null_operator = has_is_null_operator}
-    {
-    }
+/**
+ * @brief Converts page-level statistics of single column to a surviving row mask device column
+ */
+struct page_stats_to_row_mask_converter : public page_stats_caster {
+  page_stats_to_row_mask_converter(cudf::size_type total_rows,
+                                   cudf::host_span<metadata_base const> per_file_metadata,
+                                   cudf::host_span<std::vector<size_type> const> row_group_indices,
+                                   bool has_is_null_operator)
+    : page_stats_caster{.total_rows           = total_rows,
+                        .per_file_metadata    = per_file_metadata,
+                        .row_group_indices    = row_group_indices,
+                        .has_is_null_operator = has_is_null_operator}
+  {
+  }
 
-    template <typename T>
-    [[nodiscard]] std::unique_ptr<cudf::column> operator()(
-      cudf::size_type schema_idx,
-      cudf::data_type dtype,
-      std::reference_wrapper<ast::expression const> filter,
-      rmm::cuda_stream_view stream,
-      rmm::device_async_resource_ref mr) const
-    {
-      // List, Struct, Dictionary types are not supported
-      if constexpr (cudf::is_compound<T>() and not cuda::std::is_same_v<T, string_view>) {
-        CUDF_FAIL("Compound types other than strings do not have statistics");
-      } else {
-        auto [page_row_counts, page_row_offsets, col_chunk_page_offsets, min, max, is_null] =
-          compute_host_data<T>(schema_idx, dtype, stream);
+  template <typename T>
+  [[nodiscard]] std::unique_ptr<cudf::column> operator()(
+    cudf::size_type schema_idx,
+    cudf::data_type dtype,
+    std::reference_wrapper<ast::expression const> filter,
+    rmm::cuda_stream_view stream,
+    rmm::device_async_resource_ref mr) const
+  {
+    // List, Struct, Dictionary types are not supported
+    if constexpr (cudf::is_compound<T>() and not cuda::std::is_same_v<T, string_view>) {
+      CUDF_FAIL("Compound types other than strings do not have statistics");
+    } else {
+      auto [page_row_counts, page_row_offsets, col_chunk_page_offsets, min, max, is_null] =
+        compute_host_data<T>(schema_idx, dtype, stream);
 
-        std::vector<std::unique_ptr<column>> columns;
-        columns.emplace_back(min.to_device(dtype, stream, cudf::get_current_device_resource_ref()));
-        columns.emplace_back(max.to_device(dtype, stream, cudf::get_current_device_resource_ref()));
-        if (has_is_null_operator) {
-          columns.emplace_back(is_null->to_device(cudf::data_type{cudf::type_id::BOOL8},
-                                                  stream,
-                                                  cudf::get_current_device_resource_ref()));
-        }
-
-        auto page_stats_table = cudf::table(std::move(columns));
-        // Converts AST to StatsAST with reference to min, max columns in above `stats_table`.
-        parquet::detail::stats_expression_converter const stats_expr{
-          filter.get(), 1, has_is_null_operator, stream};
-
-        // Filter the input table using AST expression and return the (BOOL8) predicate column.
-        auto const page_mask =
-          cudf::detail::compute_column(page_stats_table,
-                                       stats_expr.get_stats_expr().get(),
-                                       stream,
-                                       cudf::get_current_device_resource_ref());
-
-        auto const page_mask_nullmask =
-          page_mask->null_count() ? cudf::detail::make_host_vector_async(
-                                      cudf::device_span<bitmask_type const>{
-                                        page_mask->view().null_mask(),
-                                        static_cast<size_t>(num_bitmask_words(page_mask->size()))},
-                                      stream)
-                                  : cudf::detail::make_empty_host_vector<bitmask_type>(0, stream);
-
-        auto page_indices =
-          make_page_indices_async(page_row_counts, page_row_offsets, total_rows, stream);
-
-        auto [row_mask_data, row_mask_bitmask] =
-          build_data_and_nullmask<bool>(page_mask->mutable_view(),
-                                        page_mask_nullmask.data(),
-                                        page_indices,
-                                        page_row_offsets,
-                                        cudf::data_type{cudf::type_id::BOOL8},
-                                        stream,
-                                        mr);
-
-        auto const row_mask_nullcount = cudf::detail::null_count(
-          reinterpret_cast<bitmask_type*>(row_mask_bitmask.data()), 0, total_rows, stream);
-
-        return std::make_unique<column>(cudf::data_type{cudf::type_id::BOOL8},
-                                        total_rows,
-                                        std::move(row_mask_data),
-                                        std::move(row_mask_bitmask),
-                                        row_mask_nullcount);
+      std::vector<std::unique_ptr<column>> columns;
+      columns.emplace_back(min.to_device(dtype, stream, cudf::get_current_device_resource_ref()));
+      columns.emplace_back(max.to_device(dtype, stream, cudf::get_current_device_resource_ref()));
+      if (has_is_null_operator) {
+        columns.emplace_back(is_null->to_device(
+          cudf::data_type{cudf::type_id::BOOL8}, stream, cudf::get_current_device_resource_ref()));
       }
+
+      auto page_stats_table = cudf::table(std::move(columns));
+      // Converts AST to StatsAST with reference to min, max columns in above `stats_table`.
+      parquet::detail::stats_expression_converter const stats_expr{
+        filter.get(), 1, has_is_null_operator, stream};
+
+      // Filter the input table using AST expression and return the (BOOL8) predicate column.
+      auto const page_mask = cudf::detail::compute_column(page_stats_table,
+                                                          stats_expr.get_stats_expr().get(),
+                                                          stream,
+                                                          cudf::get_current_device_resource_ref());
+
+      auto const page_mask_nullmask =
+        page_mask->null_count() ? cudf::detail::make_host_vector_async(
+                                    cudf::device_span<bitmask_type const>{
+                                      page_mask->view().null_mask(),
+                                      static_cast<size_t>(num_bitmask_words(page_mask->size()))},
+                                    stream)
+                                : cudf::detail::make_empty_host_vector<bitmask_type>(0, stream);
+
+      auto page_indices =
+        make_page_indices_async(page_row_counts, page_row_offsets, total_rows, stream);
+
+      auto [row_mask_data, row_mask_bitmask] =
+        build_data_and_nullmask<bool>(page_mask->mutable_view(),
+                                      page_mask_nullmask.data(),
+                                      page_indices,
+                                      page_row_offsets,
+                                      cudf::data_type{cudf::type_id::BOOL8},
+                                      stream,
+                                      mr);
+
+      auto const row_mask_nullcount = cudf::detail::null_count(
+        reinterpret_cast<bitmask_type*>(row_mask_bitmask.data()), 0, total_rows, stream);
+
+      return std::make_unique<column>(cudf::data_type{cudf::type_id::BOOL8},
+                                      total_rows,
+                                      std::move(row_mask_data),
+                                      std::move(row_mask_bitmask),
+                                      row_mask_nullcount);
     }
-  };
+  }
+};
+
+/**
+ * @brief Functor to build the NEXT Fenwick tree level from the current level data
+ *
+ * @param tree_level_ptrs Pointers to the start of Fenwick tree level data
+ * @param current_level Current tree level
+ * @param current_level_size Size of the current tree level
+ * @param next_level_size Size of the next tree level
+ */
+struct build_next_fenwick_tree_level_functor {
+  bool** tree_level_ptrs;
+  cudf::size_type current_level;
+  cudf::size_type current_level_size;
+  cudf::size_type next_level_size;
 
   /**
-   * @brief Functor to build the NEXT Fenwick tree level from the current level data
+   * @brief Builds the next Fenwick tree level from the current level data
+   * by ORing the two children of the current level.
    *
-   * @param tree_level_ptrs Pointers to the start of Fenwick tree level data
-   * @param current_level Current tree level
-   * @param current_level_size Size of the current tree level
-   * @param next_level_size Size of the next tree level
+   * @param next_level_idx Next tree level element index
    */
-  struct build_next_fenwick_tree_level_functor {
-    bool** tree_level_ptrs;
-    cudf::size_type current_level;
-    cudf::size_type current_level_size;
-    cudf::size_type next_level_size;
+  __device__ void operator()(cudf::size_type next_level_idx) const noexcept
+  {
+    auto const current_level_ptr = tree_level_ptrs[current_level];
+    auto next_level_ptr          = tree_level_ptrs[current_level + 1];
 
-    /**
-     * @brief Builds the next Fenwick tree level from the current level data
-     * by ORing the two children of the current level.
-     *
-     * @param next_level_idx Next tree level element index
-     */
-    __device__ void operator()(cudf::size_type next_level_idx) const noexcept
-    {
-      auto const current_level_ptr = tree_level_ptrs[current_level];
-      auto next_level_ptr          = tree_level_ptrs[current_level + 1];
-
-      // Handle the odd-sized remaining element if current_level_size is odd
-      if (current_level_size % 2 and next_level_idx == next_level_size - 1) {
-        next_level_ptr[next_level_idx] = current_level_ptr[current_level_size - 1];
-      } else {
-        next_level_ptr[next_level_idx] =
-          current_level_ptr[(next_level_idx * 2)] or current_level_ptr[(next_level_idx * 2) + 1];
-      }
+    // Handle the odd-sized remaining element if current_level_size is odd
+    if (current_level_size % 2 and next_level_idx == next_level_size - 1) {
+      next_level_ptr[next_level_idx] = current_level_ptr[current_level_size - 1];
+    } else {
+      next_level_ptr[next_level_idx] =
+        current_level_ptr[(next_level_idx * 2)] or current_level_ptr[(next_level_idx * 2) + 1];
     }
+  }
+};
+
+/**
+ * @brief Functor to binary search a `true` value in the Fenwick tree in range [start, end)
+ *
+ * @param tree_level_ptrs Pointers to the start of Fenwick tree level data
+ * @param page_offsets Pointer to page offsets describing each search range i as [page_offsets[i],
+ * page_offsets[i+1))
+ * @param num_ranges Number of search ranges
+ */
+struct search_fenwick_tree_functor {
+  bool** tree_level_ptrs;
+  cudf::size_type const* page_offsets;
+  cudf::size_type num_ranges;
+
+  /**
+   * @brief Enum class to represent which range boundary to align
+   */
+  enum class alignment : uint8_t {
+    START = 0,
+    END   = 1,
   };
 
   /**
-   * @brief Functor to binary search a `true` value in the Fenwick tree in range [start, end)
+   * @brief Checks if a value is a power of two
    *
-   * @param tree_level_ptrs Pointers to the start of Fenwick tree level data
-   * @param page_offsets Pointer to page offsets describing each search range i as [page_offsets[i],
-   * page_offsets[i+1))
-   * @param num_ranges Number of search ranges
+   * @param value Value to check
+   * @return Boolean indicating if the value is a power of two
    */
-  struct search_fenwick_tree_functor {
-    bool** tree_level_ptrs;
-    cudf::size_type const* page_offsets;
-    cudf::size_type num_ranges;
+  __device__ bool inline constexpr is_power_of_two(cudf::size_type value) const noexcept
+  {
+    return (value & (value - 1)) == 0;
+  }
 
-    /**
-     * @brief Enum class to represent which range boundary to align
-     */
-    enum class alignment : uint8_t {
-      START = 0,
-      END   = 1,
-    };
+  /**
+   * @brief Finds the smallest power of two in the range [start, end); 0 otherwise
+   *
+   * @param start Range start
+   * @param end Range end
+   * @return Largest power of two in the range [start, end); 0 otherwise
+   */
+  __device__ cudf::size_type inline constexpr smallest_power_of_two_in_range(
+    cudf::size_type start, cudf::size_type end) const noexcept
+  {
+    start--;
+    start |= start >> 1;
+    start |= start >> 2;
+    start |= start >> 4;
+    start |= start >> 8;
+    start |= start >> 16;
+    auto const result = start + 1;
+    return result < end ? result : 0;
+  }
 
-    /**
-     * @brief Checks if a value is a power of two
-     *
-     * @param value Value to check
-     * @return Boolean indicating if the value is a power of two
-     */
-    __device__ bool inline constexpr is_power_of_two(cudf::size_type value) const noexcept
-    {
-      return (value & (value - 1)) == 0;
-    }
+  /**
+   * @brief Finds the largest power of two in the range (start, end]; 0 otherwise
+   *
+   * @param start Range start
+   * @param end Range end
+   * @return Largest power of two in the range (start, end]; 0 otherwise
+   */
+  __device__ size_type inline constexpr largest_power_of_two_in_range(size_type start,
+                                                                      size_type end) const noexcept
+  {
+    auto constexpr nbits = cudf::detail::size_in_bits<size_type>() - 1;
+    auto const result    = size_type{1} << (nbits - cuda::std::countl_zero<uint32_t>(end));
+    return result > start ? result : 0;
+  }
 
-    /**
-     * @brief Finds the smallest power of two in the range [start, end); 0 otherwise
-     *
-     * @param start Range start
-     * @param end Range end
-     * @return Largest power of two in the range [start, end); 0 otherwise
-     */
-    __device__ cudf::size_type inline constexpr smallest_power_of_two_in_range(
+  /**
+   * @brief Aligns a range boundary to the next power-of-two block
+   *
+   * @tparam Alignment The boundary (start or end) to align
+   * @param start Range start
+   * @param end Range end
+   * @return A pair of the tree level and block size
+   */
+  template <alignment Alignment>
+  __device__
+    cuda::std::pair<cudf::size_type, cudf::size_type> inline constexpr align_range_boundary(
       cudf::size_type start, cudf::size_type end) const noexcept
-    {
-      start--;
-      start |= start >> 1;
-      start |= start >> 2;
-      start |= start >> 4;
-      start |= start >> 8;
-      start |= start >> 16;
-      auto const result = start + 1;
-      return result < end ? result : 0;
-    }
-
-    /**
-     * @brief Finds the largest power of two in the range (start, end]; 0 otherwise
-     *
-     * @param start Range start
-     * @param end Range end
-     * @return Largest power of two in the range (start, end]; 0 otherwise
-     */
-    __device__ size_type inline constexpr largest_power_of_two_in_range(
-      size_type start, size_type end) const noexcept
-    {
-      auto constexpr nbits = cudf::detail::size_in_bits<size_type>() - 1;
-      auto const result    = size_type{1} << (nbits - cuda::std::countl_zero<uint32_t>(end));
-      return result > start ? result : 0;
-    }
-
-    /**
-     * @brief Aligns a range boundary to the next power-of-two block
-     *
-     * @tparam Alignment The boundary (start or end) to align
-     * @param start Range start
-     * @param end Range end
-     * @return A pair of the tree level and block size
-     */
-    template <alignment Alignment>
-    __device__
-      cuda::std::pair<cudf::size_type, cudf::size_type> inline constexpr align_range_boundary(
-        cudf::size_type start, cudf::size_type end) const noexcept
-    {
-      if constexpr (Alignment == alignment::START) {
-        if (start == 0 or is_power_of_two(start)) {
-          auto const block_size = largest_power_of_two_in_range(start, end);
-          auto const tree_level = cuda::std::countr_zero<uint32_t>(block_size);
-          return cuda::std::pair{tree_level, block_size};
-        } else {
-          auto const tree_level = cuda::std::countr_zero<uint32_t>(start);
-          return cuda::std::pair{tree_level, size_type{1} << tree_level};
-        }
+  {
+    if constexpr (Alignment == alignment::START) {
+      if (start == 0 or is_power_of_two(start)) {
+        auto const block_size = largest_power_of_two_in_range(start, end);
+        auto const tree_level = cuda::std::countr_zero<uint32_t>(block_size);
+        return cuda::std::pair{tree_level, block_size};
       } else {
-        auto block_size = end & -end;
-        if (start > 0 and is_power_of_two(end)) {
-          block_size = end - smallest_power_of_two_in_range(start, end);
-        }
-        return cuda::std::pair{cuda::std::countr_zero<uint32_t>(block_size), block_size};
+        auto const tree_level = cuda::std::countr_zero<uint32_t>(start);
+        return cuda::std::pair{tree_level, size_type{1} << tree_level};
+      }
+    } else {
+      auto block_size = end & -end;
+      if (start > 0 and is_power_of_two(end)) {
+        block_size = end - smallest_power_of_two_in_range(start, end);
+      }
+      return cuda::std::pair{cuda::std::countr_zero<uint32_t>(block_size), block_size};
+    }
+  }
+
+  /**
+   * @brief Searches the Fenwick tree to find a `true` value in range [start, end)
+   *
+   * @param range_idx Index of the range to search
+   * @return Boolean indicating if a `true` value is found in the range
+   */
+  __device__ bool operator()(cudf::size_type range_idx) const noexcept
+  {
+    // Retrieve start and end for the current range [start, end)
+    size_type start = page_offsets[range_idx];
+    size_type end   = page_offsets[range_idx + 1];
+
+    // Return early if the range is empty or invalid
+    if (start >= end or range_idx >= num_ranges) { return false; }
+
+    // Binary search decomposition loop
+    while (start < end) {
+      // Find the largest power-of-two block that begins and `start` and aligns it up
+      auto const [start_tree_level, start_block_size] =
+        align_range_boundary<alignment::START>(start, end);
+
+      // Find the largest power-of-two block that aligns `end` down.
+      auto const [end_tree_level, end_block_size] =
+        align_range_boundary<alignment::END>(start, end);
+
+      // Check the `start` side alignment block: [start, start + start_block_size) and if it's the
+      // larger block
+      if (start + start_block_size <= end and start_block_size >= end_block_size) {
+        auto const tree_level = start_tree_level;
+        auto const mask_index = start >> tree_level;
+        if (tree_level_ptrs[tree_level][mask_index]) { return true; }
+        start += start_block_size;
+      }
+      // Otherwise, check the `end` side alignment block: [end - end_block_size, end)
+      else if (end - end_block_size >= start) {
+        auto const tree_level = end_tree_level;
+        auto const mask_index = (end - end_block_size) >> tree_level;
+        if (tree_level_ptrs[tree_level][mask_index]) { return true; }
+        end -= end_block_size;
+      }
+      // Fallback for small, unaligned ranges. e.g., [11, 13)
+      else {
+        if (tree_level_ptrs[0][start]) { return true; }
+        start++;
       }
     }
-
-    /**
-     * @brief Searches the Fenwick tree to find a `true` value in range [start, end)
-     *
-     * @param range_idx Index of the range to search
-     * @return Boolean indicating if a `true` value is found in the range
-     */
-    __device__ bool operator()(cudf::size_type range_idx) const noexcept
-    {
-      // Retrieve start and end for the current range [start, end)
-      size_type start = page_offsets[range_idx];
-      size_type end   = page_offsets[range_idx + 1];
-
-      // Return early if the range is empty or invalid
-      if (start >= end or range_idx >= num_ranges) { return false; }
-
-      // Binary search decomposition loop
-      while (start < end) {
-        // Find the largest power-of-two block that begins and `start` and aligns it up
-        auto const [start_tree_level, start_block_size] =
-          align_range_boundary<alignment::START>(start, end);
-
-        // Find the largest power-of-two block that aligns `end` down.
-        auto const [end_tree_level, end_block_size] =
-          align_range_boundary<alignment::END>(start, end);
-
-        // Check the `start` side alignment block: [start, start + start_block_size) and if it's the
-        // larger block
-        if (start + start_block_size <= end and start_block_size >= end_block_size) {
-          auto const tree_level = start_tree_level;
-          auto const mask_index = start >> tree_level;
-          if (tree_level_ptrs[tree_level][mask_index]) { return true; }
-          start += start_block_size;
-        }
-        // Otherwise, check the `end` side alignment block: [end - end_block_size, end)
-        else if (end - end_block_size >= start) {
-          auto const tree_level = end_tree_level;
-          auto const mask_index = (end - end_block_size) >> tree_level;
-          if (tree_level_ptrs[tree_level][mask_index]) { return true; }
-          end -= end_block_size;
-        }
-        // Fallback for small, unaligned ranges. e.g., [11, 13)
-        else {
-          if (tree_level_ptrs[0][start]) { return true; }
-          start++;
-        }
-      }
-      return false;
-    }
-  };
+    return false;
+  }
+};
 
 }  // namespace
 
-std::unique_ptr<cudf::column>
-aggregate_reader_metadata::build_row_mask_with_page_index_stats(
+std::unique_ptr<cudf::column> aggregate_reader_metadata::build_row_mask_with_page_index_stats(
   cudf::host_span<std::vector<size_type> const> row_group_indices,
   cudf::host_span<cudf::data_type const> output_dtypes,
   cudf::host_span<cudf::size_type const> output_column_schemas,
