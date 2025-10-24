@@ -452,26 +452,34 @@ void decode_page_headers(pass_intermediate_data& pass,
 
     // Lambda to collect data ptrs (locations) for all pages in a given range of chunks
     auto const process_chunk = [&](size_type start, size_type end) -> std::vector<uint8_t*> {
+      // Return early if no chunks
       if (start >= end) { return {}; }
+
       std::vector<uint8_t*> page_locations;
       std::for_each(pass.chunks.begin() + start, pass.chunks.begin() + end, [&](auto const& chunk) {
         CUDF_EXPECTS(chunk.h_chunk_info and
                        std::cmp_equal(chunk.h_chunk_info->pages.size(), chunk.num_data_pages),
                      "Encountered invalid sized data page information in the page index");
 
+        // Column chunk buffer's data pointer
         auto data_ptr = const_cast<uint8_t*>(chunk.compressed_data);
 
+        // Dictionary page, if any
         if (chunk.num_dict_pages) {
           CUDF_EXPECTS(chunk.h_chunk_info->dictionary_offset.has_value() and
                          chunk.h_chunk_info->dictionary_size.has_value(),
                        "Encountered missing dictionary page information in the page index");
-          CUDF_EXPECTS(
-            std::cmp_less(chunk.h_chunk_info->dictionary_offset.value(),
-                          chunk.h_chunk_info->pages.front().location.offset),
-            "Encountered dictionary page location to be than the first data page location");
+          // Parquet spec requires that the dictionary page be the first column chunk page
+          // if the column chunk has dictionary encoding
+          // Ref: https://github.com/apache/parquet-format?tab=readme-ov-file#column-chunks
+          CUDF_EXPECTS(std::cmp_less(chunk.h_chunk_info->dictionary_offset.value(),
+                                     chunk.h_chunk_info->pages.front().location.offset),
+                       "Encountered dictionary page located beyond the first data page");
           page_locations.emplace_back(data_ptr);
           data_ptr += chunk.h_chunk_info->dictionary_size.value();
         }
+
+        // Data pages
         auto const num_data_pages = chunk.h_chunk_info->pages.size();
         std::for_each(thrust::counting_iterator<size_t>(0),
                       thrust::counting_iterator(num_data_pages),
@@ -483,12 +491,14 @@ void decode_page_headers(pass_intermediate_data& pass,
                         }
                       });
       });
+
       return page_locations;
     };
 
     // Decide if we should collect page locations sequentially or in parallel
     auto const total_chunks       = pass.chunks.size();
-    auto const parallel_threshold = 128;
+    // Empirically chosen to have enough chunks per thread
+    auto const parallel_threshold = 512;
     if (total_chunks < parallel_threshold) {
       auto page_locations = process_chunk(0, total_chunks);
       host_page_locations.insert(host_page_locations.end(),
@@ -526,7 +536,7 @@ void decode_page_headers(pass_intermediate_data& pass,
     auto page_locations = cudf::detail::make_device_uvector_async(
       host_page_locations, stream, cudf::get_current_device_resource_ref());
 
-    // (Fast) decode page headers one thread per page
+    // Accelerated decode page headers, one thread per page
     decode_page_headers_with_pgidx(pass.chunks.d_begin(),
                                    unsorted_pages.begin(),
                                    page_locations.begin(),
@@ -536,7 +546,7 @@ void decode_page_headers(pass_intermediate_data& pass,
                                    error_code.data(),
                                    stream);
   } else {
-    // (Slow) decode page headers, one warp (lane)per pages of a chunk
+    // (Slow) decode page headers, one warp (lane) per pages of a chunk
     decode_page_headers(pass.chunks.d_begin(),
                         d_chunk_page_info.begin(),
                         pass.chunks.size(),
