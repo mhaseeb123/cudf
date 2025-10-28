@@ -148,47 +148,6 @@ struct page_stats_caster : public stats_caster_base {
                                     dtype,
                                     stream,
                                     mr);
-    auto const is_null_nulls =
-      is_nullcol->null_count()
-        ? cudf::detail::null_count(
-            reinterpret_cast<bitmask_type*>(is_null_nullmask.data()), 0, total_rows, stream)
-        : 0;
-    return std::make_unique<column>(
-      dtype, total_rows, std::move(is_null_data), std::move(is_null_nullmask), is_null_nulls);
-  }
-
-  /**
-   * @brief Builds a device column containing each page's `is_null` statistic at
-   *        respectively of a column at each row index.
-   *
-   * @param is_null Host column storing the page-level is_null statistics
-   * @param page_indices Device vector containing the page index for each row index
-   * @param page_row_offsets Host vector row offsets of each page
-   * @param stream CUDA stream
-   * @param mr Device memory resource
-   *
-   * @return A pair containing the output data buffer and nullmask
-   */
-  [[nodiscard]] std::unique_ptr<column> build_is_null_device_column(
-    host_column<bool> const& is_null,
-    cudf::device_span<size_type const> page_indices,
-    cudf::host_span<size_type const> page_row_offsets,
-    rmm::cuda_stream_view stream,
-    rmm::device_async_resource_ref mr) const
-  {
-    CUDF_EXPECTS(
-      has_is_null_operator,
-      "The filter expression must have an IS_NULL operator to build is_null device column");
-    auto const dtype = cudf::data_type{cudf::type_id::BOOL8};
-    auto is_nullcol  = is_null.to_device(dtype, stream, cudf::get_current_device_resource_ref());
-    auto [is_null_data, is_null_nullmask] =
-      build_data_and_nullmask<bool>(is_nullcol->mutable_view(),
-                                    is_null.null_mask.data(),
-                                    page_indices,
-                                    page_row_offsets,
-                                    dtype,
-                                    stream,
-                                    mr);
     auto const null_nulls =
       is_nullcol->null_count()
         ? cudf::detail::null_count(
@@ -258,7 +217,7 @@ struct page_stats_caster : public stats_caster_base {
 
     // Buffer for row-level strings nullmask (output)
     auto output_nullmask = rmm::device_buffer{};
-    if (input_null_count) {
+    if (host_null_count) {
       // Initialize output nullmask to all bits set.
       output_nullmask = cudf::create_null_mask(total_rows, mask_state::ALL_VALID, stream, mr);
 
@@ -358,9 +317,6 @@ struct page_stats_caster : public stats_caster_base {
       host_column<T> max(total_pages, stream);
       std::optional<host_column<bool>> is_null;
       if (has_is_null_operator) { is_null = host_column<bool>(total_pages, stream); }
-      std::optional<host_column<bool>> is_null;
-      if (has_is_null_operator) { is_null = host_column<bool>(total_pages, stream); }
-
       // Populate the host columns with page-level min, max statistics from the page index
       auto page_offset_idx = 0;
       // For all row data sources
