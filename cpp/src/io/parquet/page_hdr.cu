@@ -569,13 +569,10 @@ struct decode_page_headers_with_pgidx_fn {
   uint8_t** page_locations;
   size_t* chunk_page_offsets;
   int32_t num_chunks;
-  int32_t num_pages;
   kernel_error::pointer error_code;
 
   __device__ void operator()(size_type page_idx) const noexcept
   {
-    if (page_idx >= num_pages) { return; }
-
     // Binary search the the column chunk index for this page
     auto const chunk_idx = static_cast<int32_t>(
       cuda::std::distance(
@@ -758,18 +755,21 @@ void decode_page_headers(ColumnChunkDesc* chunks,
 void decode_page_headers_with_pgidx(ColumnChunkDesc* chunks,
                                     PageInfo* pages,
                                     uint8_t** page_locations,
-                                    size_t* chunk_page_counts,
+                                    size_t* chunk_page_offsets,
                                     int32_t num_chunks,
                                     int32_t num_pages,
                                     kernel_error::pointer error_code,
                                     rmm::cuda_stream_view stream)
 {
-  thrust::for_each(
-    rmm::exec_policy_nosync(stream),
-    thrust::counting_iterator<size_type>(0),
-    thrust::counting_iterator<size_type>(num_pages),
-    decode_page_headers_with_pgidx_fn{
-      chunks, pages, page_locations, chunk_page_counts, num_chunks, num_pages, error_code});
+  thrust::for_each(rmm::exec_policy_nosync(stream),
+                   thrust::counting_iterator(0),
+                   thrust::counting_iterator(num_pages),
+                   decode_page_headers_with_pgidx_fn{.colchunks          = chunks,
+                                                     .pages              = pages,
+                                                     .page_locations     = page_locations,
+                                                     .chunk_page_offsets = chunk_page_offsets,
+                                                     .num_chunks         = num_chunks,
+                                                     .error_code         = error_code});
 }
 
 void build_string_dictionary_index(ColumnChunkDesc* chunks,

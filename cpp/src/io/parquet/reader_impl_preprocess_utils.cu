@@ -420,12 +420,12 @@ void decode_page_headers(pass_intermediate_data& pass,
   CUDF_FUNC_RANGE();
 
   auto iter = thrust::counting_iterator<size_t>(0);
-  rmm::device_uvector<size_t> chunk_page_counts(pass.chunks.size() + 1, stream);
+  rmm::device_uvector<size_t> chunk_page_offsets(pass.chunks.size() + 1, stream);
   thrust::transform_exclusive_scan(
     rmm::exec_policy_nosync(stream),
     iter,
     iter + pass.chunks.size() + 1,
-    chunk_page_counts.begin(),
+    chunk_page_offsets.begin(),
     cuda::proclaim_return_type<size_t>(
       [chunks = pass.chunks.d_begin(), num_chunks = pass.chunks.size()] __device__(size_t i) {
         return static_cast<size_t>(
@@ -437,10 +437,10 @@ void decode_page_headers(pass_intermediate_data& pass,
   thrust::for_each(rmm::exec_policy_nosync(stream),
                    iter,
                    iter + pass.chunks.size(),
-                   [cpi               = d_chunk_page_info.begin(),
-                    chunk_page_counts = chunk_page_counts.begin(),
-                    unsorted_pages    = unsorted_pages.begin()] __device__(size_t i) {
-                     cpi[i].pages = &unsorted_pages[chunk_page_counts[i]];
+                   [cpi                = d_chunk_page_info.begin(),
+                    chunk_page_offsets = chunk_page_offsets.begin(),
+                    unsorted_pages     = unsorted_pages.begin()] __device__(size_t i) {
+                     cpi[i].pages = &unsorted_pages[chunk_page_offsets[i]];
                    });
 
   kernel_error error_code(stream);
@@ -497,17 +497,23 @@ void decode_page_headers(pass_intermediate_data& pass,
     };
 
     // Decide if to launch the data ptr collection task sequentially or using thread pool
-    auto const total_chunks       = pass.chunks.size();
-    auto const parallel_threshold = 512;  // Empirically chosen to have enough chunks per thread
-    auto constexpr num_tasks      = 2;
+    auto const total_chunks            = pass.chunks.size();
+    auto constexpr max_num_tasks       = 8;
+    auto constexpr min_chunks_per_task = 512;
 
-    if (total_chunks < parallel_threshold) {
+    if (total_chunks < min_chunks_per_task) {
       auto page_locations = process_chunk(0, total_chunks);
       host_page_locations.insert(host_page_locations.end(),
                                  std::make_move_iterator(page_locations.begin()),
                                  std::make_move_iterator(page_locations.end()));
     } else {
-      auto const chunks_per_thread = cudf::util::div_rounding_up_unsafe(total_chunks, num_tasks);
+      // Determine the number of tasks to launch
+      auto const num_tasks = std::clamp<cudf::size_type>(
+        cudf::util::div_rounding_up_unsafe(total_chunks, min_chunks_per_task),
+        size_type{2},
+        max_num_tasks);
+      // Determine the number of column chunks processed per task
+      auto const chunks_per_task = cudf::util::div_rounding_up_unsafe(total_chunks, num_tasks);
       std::vector<std::future<std::vector<uint8_t*>>> page_location_tasks;
       page_location_tasks.reserve(num_tasks);
       std::for_each(thrust::make_counting_iterator<size_t>(0),
@@ -515,9 +521,9 @@ void decode_page_headers(pass_intermediate_data& pass,
                     [&](auto const tid) {
                       page_location_tasks.emplace_back(
                         cudf::detail::host_worker_pool().submit_task([&, tid = tid] {
-                          auto const chunk_start = std::min(tid * chunks_per_thread, total_chunks);
+                          auto const chunk_start = std::min(tid * chunks_per_task, total_chunks);
                           auto const chunk_end =
-                            std::min(chunk_start + chunks_per_thread, total_chunks);
+                            std::min(chunk_start + chunks_per_task, total_chunks);
                           return process_chunk(chunk_start, chunk_end);
                         }));
                     });
@@ -543,7 +549,7 @@ void decode_page_headers(pass_intermediate_data& pass,
     decode_page_headers_with_pgidx(pass.chunks.d_begin(),
                                    unsorted_pages.begin(),
                                    page_locations.begin(),
-                                   chunk_page_counts.begin(),
+                                   chunk_page_offsets.begin(),
                                    pass.chunks.size(),
                                    unsorted_pages.size(),
                                    error_code.data(),
