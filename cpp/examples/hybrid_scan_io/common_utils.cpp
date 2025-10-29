@@ -64,12 +64,6 @@ void check_tables_equal(cudf::table_view const& lhs_table,
                         cudf::table_view const& rhs_table,
                         rmm::cuda_stream_view stream)
 {
-  std::cout << "Checking tables equal...\n";
-
-  if (lhs_table.is_empty() and rhs_table.is_empty()) {
-    std::cout << "Both tables are empty, assuming as identical: true\n\n";
-    return;
-  }
   // Helper to write parquet data for inspection
   auto const write_parquet =
     [](cudf::table_view table, std::string filepath, rmm::cuda_stream_view stream) {
@@ -78,6 +72,16 @@ void check_tables_equal(cudf::table_view const& lhs_table,
       cudf::io::write_parquet(opts, stream);
     };
 
+  if (lhs_table.num_columns() != rhs_table.num_columns() or
+      lhs_table.num_rows() != rhs_table.num_rows()) {
+    write_parquet(lhs_table, "lhs_table.parquet", stream);
+    write_parquet(rhs_table, "rhs_table.parquet", stream);
+    throw std::logic_error("Tables have different number of columns or rows");
+  }
+  if (lhs_table.is_empty() or lhs_table.num_rows() == 0) {
+    std::cout << "Both tables are empty, assuming as identical: true\n\n";
+    return;
+  }
   try {
     // Left anti-join the original and transcoded tables identical tables should not throw an
     // exception and return an empty indices vector
