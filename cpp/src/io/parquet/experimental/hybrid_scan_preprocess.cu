@@ -162,6 +162,9 @@ void hybrid_scan_reader_impl::setup_compressed_data(
 
   pass.has_compressed_data = setup_column_chunks(column_chunk_data);
 
+  // Must synchronize stream here to ensure that the column chunk data is available for the next step.
+  _stream.synchronize();
+
   // Process dataset chunk pages into output columns
   auto const total_pages = _has_page_index ? count_page_headers_with_pgidx(chunks, _stream)
                                            : count_page_headers(chunks, _stream);
