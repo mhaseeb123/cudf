@@ -38,8 +38,8 @@ using metadata_base = parquet::detail::metadata;
  * columns
  */
 [[nodiscard]] bool compute_has_page_index(
-  cudf::host_span<metadata_base const> file_metadatas,
-  cudf::host_span<std::vector<size_type> const> row_group_indices);
+  std::span<metadata_base const> file_metadatas,
+  std::span<std::vector<size_type> const> row_group_indices);
 
 /**
  * @brief Compute page row offsets and column chunk page (count) offsets for a given column schema
@@ -53,8 +53,8 @@ using metadata_base = parquet::detail::metadata;
  */
 [[nodiscard]] std::pair<cudf::detail::host_vector<size_type>, cudf::detail::host_vector<size_type>>
 compute_page_row_offsets_and_colchunk_page_offsets(
-  cudf::host_span<metadata_base const> per_file_metadata,
-  cudf::host_span<std::vector<size_type> const> row_group_indices,
+  std::span<metadata_base const> per_file_metadata,
+  std::span<std::vector<size_type> const> row_group_indices,
   size_type schema_idx,
   rmm::cuda_stream_view stream);
 
