@@ -35,7 +35,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -71,14 +70,14 @@ std::size_t chunk_read_limit = 4294967296UL;   // 4GB
 std::size_t pass_read_limit  = 17179869184UL;  // 16GB
 
 // Collect all parquet files recursively
-std::vector<std::string> collect_parquet_files(const std::string& path)
+std::vector<std::string> collect_parquet_files(std::string const& path)
 {
   std::set<std::string> file_set;
 
   if (fs::is_regular_file(path)) {
     if (path.ends_with(".parquet")) { file_set.insert(fs::canonical(path).string()); }
   } else if (fs::is_directory(path)) {
-    for (const auto& entry : fs::recursive_directory_iterator(path)) {
+    for (auto const& entry : fs::recursive_directory_iterator(path)) {
       if (entry.is_regular_file() && entry.path().extension() == ".parquet") {
         file_set.insert(fs::canonical(entry.path()).string());
       }
@@ -93,15 +92,16 @@ std::vector<std::string> collect_parquet_files(const std::string& path)
 class TableScanSimulator {
  public:
   TableScanSimulator(int table_id,
-                     const std::vector<std::string>& files,
+                     std::vector<std::string> const& files,
                      rmm::device_async_resource_ref mr)
     : table_id_(table_id), files_(files), mr_(mr)
   {
   }
 
-  void run(int iterations)
+  void run(int iterations, bool use_dedicated_stream)
   {
-    auto table_start = std::chrono::steady_clock::now();
+    auto table_start      = std::chrono::steady_clock::now();
+    auto dedicated_stream = use_dedicated_stream ? std::make_unique<rmm::cuda_stream>() : nullptr;
 
     for (int iter = 1; iter <= iterations && !stop_flag; iter++) {
       auto iter_start     = std::chrono::steady_clock::now();
@@ -109,10 +109,12 @@ class TableScanSimulator {
       int64_t iter_bytes  = 0;
       int files_this_iter = 0;
 
-      // Get a fresh stream from the global pool (like Velox does per split)
-      auto stream = cudf::detail::global_cuda_stream_pool().get_stream();
+      // Keep long-lived reader streams separate from libcudf's internal stream pool.
+      auto const stream = use_dedicated_stream
+                            ? dedicated_stream->view()
+                            : cudf::detail::global_cuda_stream_pool().get_stream();
 
-      for (const auto& filepath : files_) {
+      for (auto const& filepath : files_) {
         if (stop_flag) break;
 
         auto file_start = std::chrono::steady_clock::now();
@@ -153,7 +155,7 @@ class TableScanSimulator {
           total_bytes_read += file_size;
           success_count++;
 
-        } catch (const std::exception& e) {
+        } catch (std::exception const& e) {
           auto file_end = std::chrono::steady_clock::now();
           auto file_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(file_end - file_start).count();
@@ -205,8 +207,9 @@ class TableScanSimulator {
 };
 
 // Simulates a single "query" with multiple concurrent table scans
-void run_query_simulation(const std::vector<std::vector<std::string>>& table_files,
+void run_query_simulation(std::vector<std::vector<std::string>> const& table_files,
                           int iterations,
+                          bool use_dedicated_streams,
                           rmm::device_async_resource_ref mr)
 {
   std::vector<std::thread> threads;
@@ -219,8 +222,10 @@ void run_query_simulation(const std::vector<std::vector<std::string>>& table_fil
   }
 
   // Launch all table scans concurrently (like Velox does in a query)
-  for (size_t i = 0; i < scanners.size(); i++) {
-    threads.emplace_back([&scanners, i, iterations]() { scanners[i]->run(iterations); });
+  for (auto const& scanner : scanners) {
+    threads.emplace_back([scanner = scanner.get(), iterations, use_dedicated_streams]() {
+      scanner->run(iterations, use_dedicated_streams);
+    });
   }
 
   // Wait for all to complete
@@ -243,6 +248,7 @@ int main(int argc, char* argv[])
     std::cerr << "  --tables N        Alias for --threads\n";
     std::cerr << "  --chunk-limit N   Chunk read limit in GB (default: 4)\n";
     std::cerr << "  --pass-limit N    Pass read limit in GB (default: 16)\n";
+    std::cerr << "  --global-pool-streams  Reuse libcudf's internal pool for reader streams\n";
     std::cerr << "\n";
     std::cerr << "To use a specific GPU, set CUDA_VISIBLE_DEVICES:\n";
     std::cerr << "  CUDA_VISIBLE_DEVICES=2 " << argv[0]
@@ -252,8 +258,9 @@ int main(int argc, char* argv[])
 
   // Parse arguments
   std::vector<std::string> parquet_paths;
-  int iterations  = 100;
-  int num_threads = 5;
+  int iterations             = 100;
+  int num_threads            = 5;
+  bool use_dedicated_streams = true;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -265,6 +272,8 @@ int main(int argc, char* argv[])
       chunk_read_limit = static_cast<std::size_t>(std::stod(argv[++i]) * 1024 * 1024 * 1024);
     } else if (arg == "--pass-limit" && i + 1 < argc) {
       pass_read_limit = static_cast<std::size_t>(std::stod(argv[++i]) * 1024 * 1024 * 1024);
+    } else if (arg == "--global-pool-streams") {
+      use_dedicated_streams = false;
     } else if (!arg.starts_with("--")) {
       parquet_paths.push_back(arg);
     }
@@ -285,16 +294,17 @@ int main(int argc, char* argv[])
   std::cout << "Pass read limit: " << (pass_read_limit / 1024.0 / 1024.0 / 1024.0) << " GB\n";
   std::cout << "Iterations per thread: " << iterations << "\n";
   std::cout << "Concurrent threads: " << num_threads << "\n";
+  std::cout << "Parent streams: " << (use_dedicated_streams ? "dedicated" : "global pool") << "\n";
+  std::cout << "Memory resource: cudaMallocAsync\n";
 
   // Setup async memory resource (like Velox does)
   std::cout << "\nSetting up CUDA async memory resource...\n";
-  cuda::mr::any_resource<cuda::mr::device_accessible> async_mr =
-    rmm::mr::cuda_async_memory_resource{};
-  cudf::set_current_device_resource(async_mr);
+  cuda::mr::any_resource<cuda::mr::device_accessible> mr = rmm::mr::cuda_async_memory_resource{};
+  cudf::set_current_device_resource(mr);
 
   // Collect all parquet files from all paths
   std::vector<std::string> all_files;
-  for (const auto& path : parquet_paths) {
+  for (auto const& path : parquet_paths) {
     std::cout << "Collecting parquet files from: " << path << "\n";
     auto files = collect_parquet_files(path);
     std::cout << "  Found " << files.size() << " files\n";
@@ -328,7 +338,7 @@ int main(int argc, char* argv[])
   auto start_time = std::chrono::steady_clock::now();
 
   // Run the simulation
-  run_query_simulation(thread_files, iterations, async_mr);
+  run_query_simulation(thread_files, iterations, use_dedicated_streams, mr);
 
   auto end_time = std::chrono::steady_clock::now();
   auto elapsed =
@@ -356,7 +366,7 @@ int main(int argc, char* argv[])
 
   if (!failures.empty()) {
     std::cout << "\nFailures:\n";
-    for (const auto& f : failures) {
+    for (auto const& f : failures) {
       std::cout << "  - Table " << f.table_id << ", Iteration " << f.iteration << ": " << f.file
                 << "\n";
       std::cout << "    Error: " << f.error << "\n";
