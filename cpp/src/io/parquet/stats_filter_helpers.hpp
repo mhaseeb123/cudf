@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -280,7 +280,7 @@ class stats_caster_base {
     {
       if constexpr (std::is_same_v<T, string_view>) {
         auto [d_chars, d_offsets, _] = make_strings_children(val, chars, stream, mr);
-        auto null_mask_buffer = rmm::device_buffer{
+        auto null_mask_buffer        = rmm::device_buffer{
           null_mask.data(), cudf::bitmask_allocation_size_bytes(val.size()), stream, mr};
         stream.synchronize();
         return cudf::make_strings_column(
