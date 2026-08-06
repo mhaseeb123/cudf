@@ -1506,47 +1506,21 @@ dictionary_literals_collector::dictionary_literals_collector(
   auto const num_input_columns = static_cast<cudf::size_type>(_output_dtypes.size());
   _literals.resize(num_input_columns);
   _operators.resize(num_input_columns);
-  expr.accept(*this);
+  // The result is discarded - `build_comparison` always relaxes and only records literals
+  std::ignore = build(expr);
 }
 
-std::reference_wrapper<ast::expression const> dictionary_literals_collector::visit(
-  ast::operation const& expr)
+parquet::detail::maybe_pruning_expr dictionary_literals_collector::build_comparison(
+  ast::ast_operator op, ast::column_reference const& col_ref, ast::literal const& literal)
 {
   using cudf::ast::ast_operator;
-  using parquet::detail::extract_binary_operands;
-  using parquet::detail::extract_unary_operand;
-  using parquet::detail::operand_kind;
 
-  auto const input_op       = expr.get_operator();
-  auto const operator_arity = cudf::ast::detail::ast_operator_arity(input_op);
-
-  if (operator_arity == 1) {
-    auto const [kind, col_ref] = extract_unary_operand(expr);
-
-    if (kind == operand_kind::COLUMN_REF) {
-      col_ref->accept(*this);
-    } else {
-      std::ignore = visit_operands(expr.get_operands());
-    }
-    return expr;
+  if (op == ast_operator::EQUAL or op == ast_operator::NOT_EQUAL) {
+    auto const col_idx = col_ref.get_column_index();
+    _literals[col_idx].emplace_back(const_cast<ast::literal*>(&literal));
+    _operators[col_idx].emplace_back(op);
   }
-
-  // Binary operation
-  auto const [op, lhs_kind, rhs_kind, col_ref, literal] = extract_binary_operands(expr);
-
-  // Push expressions for `col op lit` or `lit op col` forms
-  if (lhs_kind == operand_kind::COLUMN_REF and rhs_kind == operand_kind::LITERAL) {
-    col_ref->accept(*this);
-    if (op == ast_operator::EQUAL or op == ast_operator::NOT_EQUAL) {
-      auto const col_idx = col_ref->get_column_index();
-      _literals[col_idx].emplace_back(const_cast<ast::literal*>(literal));
-      _operators[col_idx].emplace_back(op);
-    }
-  }  // For all other forms, visit operands to collect any nested literals
-  else {
-    std::ignore = visit_operands(expr.get_operands());
-  }
-  return expr;
+  return std::nullopt;
 }
 
 std::pair<std::vector<std::vector<ast::literal*>>, std::vector<std::vector<ast::ast_operator>>>

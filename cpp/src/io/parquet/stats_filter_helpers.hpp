@@ -305,32 +305,9 @@ class stats_caster_base {
  * @brief Constructs a boolean mask indicating which input columns can participate in statistics
  * (StatsAST) based filtering
  */
-class stats_columns_collector : public ast::detail::expression_transformer {
+class stats_columns_collector : public pruning_expression_builder {
  public:
-  stats_columns_collector() = default;
-
   stats_columns_collector(ast::expression const& expr, cudf::size_type num_columns);
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::literal const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::literal const& expr) override;
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::column_reference const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::column_reference const& expr) override;
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::column_name_reference const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(
-    ast::column_name_reference const& expr) override;
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::operation const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::operation const& expr) override;
 
   /**
    * @brief Return a boolean vector indicating input columns that can participate in stats based
@@ -341,8 +318,25 @@ class stats_columns_collector : public ast::detail::expression_transformer {
   std::pair<thrust::host_vector<bool>, bool> get_stats_columns_mask() &&;
 
  protected:
-  std::vector<std::reference_wrapper<ast::expression const>> visit_operands(
-    cudf::host_span<std::reference_wrapper<ast::expression const> const> operands);
+  /**
+   * @copydoc pruning_expression_builder::build_comparison
+   *
+   * Always relaxes - this only records which columns are referenced.
+   */
+  [[nodiscard]] maybe_pruning_expr build_comparison(ast::ast_operator op,
+                                                    ast::column_reference const& col_ref,
+                                                    ast::literal const& literal) override;
+
+  /**
+   * @copydoc pruning_expression_builder::build_unary
+   */
+  [[nodiscard]] maybe_pruning_expr build_unary(ast::ast_operator op,
+                                               ast::column_reference const& col_ref) override;
+
+  /**
+   * @copydoc pruning_expression_builder::validate_column_reference
+   */
+  void validate_column_reference(ast::column_reference const& col_ref) const override;
 
   size_type _num_columns;
 

@@ -137,32 +137,36 @@ std::reference_wrapper<ast::expression const> named_to_reference_converter::visi
   return std::reference_wrapper<ast::expression const>(_col_ref.back());
 }
 
-maybe_pruning_expr pruning_expression_builder::build_negation(ast::expression const& operand)
+pruning_expression_builder::negation_result pruning_expression_builder::build_negation(
+  ast::expression const& operand)
 {
   auto const* child = dynamic_cast<ast::operation const*>(&operand);
-  if (child == nullptr) { return std::nullopt; }
+  if (child == nullptr) { return {.handled = false, .expr = std::nullopt}; }
 
   auto const child_op = child->get_operator();
 
-  // `NOT(op col)`. Only the derived converter knows whether its summary column for `op` is exact
-  // enough to negate
+  // `NOT(op col)`. Only the derived builder knows whether its summary column for `op` is exact
+  // enough to negate. When it is not, report the negation as unhandled so that the operand is
+  // still walked - a collecting subclass has to see the `op col` underneath
   if (cudf::ast::detail::ast_operator_arity(child_op) == 1) {
     auto const [kind, col_ref] = extract_unary_operand(*child);
-    if (kind != operand_kind::COLUMN_REF) { return std::nullopt; }
+    if (kind != operand_kind::COLUMN_REF) { return {.handled = false, .expr = std::nullopt}; }
     validate_column_reference(*col_ref);
-    return build_negated_unary(child_op, *col_ref);
+    auto const negated = build_negated_unary(child_op, *col_ref);
+    return {.handled = negated.has_value(), .expr = negated};
   }
 
-  // `NOT(col op lit)` is `col negated_op lit`, which the converter can rewrite directly
+  // `NOT(col op lit)` is `col negated_op lit`, which the builder can rewrite directly. This is
+  // handled even when the rewrite relaxes, so that the operand is not walked a second time
   auto const [op, lhs_kind, rhs_kind, col_ref, literal] = extract_binary_operands(*child);
   if (lhs_kind != operand_kind::COLUMN_REF or rhs_kind != operand_kind::LITERAL) {
-    return std::nullopt;
+    return {.handled = false, .expr = std::nullopt};
   }
   auto const negated_op = transform_operator<operator_transform::NEGATE>(op);
-  if (not negated_op.has_value()) { return std::nullopt; }
+  if (not negated_op.has_value()) { return {.handled = false, .expr = std::nullopt}; }
 
   validate_column_reference(*col_ref);
-  return build_comparison(negated_op.value(), *col_ref, *literal);
+  return {.handled = true, .expr = build_comparison(negated_op.value(), *col_ref, *literal)};
 }
 
 maybe_pruning_expr pruning_expression_builder::build(ast::expression const& expr)
@@ -192,8 +196,8 @@ maybe_pruning_expr pruning_expression_builder::build(ast::expression const& expr
     }
     // `NOT` distributes into a comparison or a unary operation over a column reference
     if (input_op == ast_operator::NOT) {
-      if (auto const negated = build_negation(operands.front().get()); negated.has_value()) {
-        return negated;
+      if (auto const negated = build_negation(operands.front().get()); negated.handled) {
+        return negated.expr;
       }
     }
 

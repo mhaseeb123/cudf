@@ -444,96 +444,46 @@ equality_literals_collector::equality_literals_collector(
     _output_column_schemas{output_column_schemas},
     _schema_tree{schema_tree}
 {
-  CUDF_EXPECTS(
-    _output_column_schemas.empty() or _output_column_schemas.size() == _output_dtypes.size(),
-    "output_column_schemas must have the same size as output_dtypes when provided");
-  _literals.resize(static_cast<size_type>(_output_dtypes.size()));
-  expr.accept(*this);
+  _literals.resize(static_cast<cudf::size_type>(_output_dtypes.size()));
+  // The result is discarded - `build_comparison` always relaxes and only records literals
+  std::ignore = build(expr);
 }
 
-std::reference_wrapper<ast::expression const> equality_literals_collector::visit(
-  ast::literal const& expr)
+void equality_literals_collector::validate_column_reference(
+  ast::column_reference const& col_ref) const
 {
-  return expr;
-}
-
-std::reference_wrapper<ast::expression const> equality_literals_collector::visit(
-  ast::column_reference const& expr)
-{
-  CUDF_EXPECTS(expr.get_table_source() == ast::table_reference::LEFT,
+  CUDF_EXPECTS(col_ref.get_table_source() == ast::table_reference::LEFT,
                "DictionaryAST and BloomfilterAST support only left table");
-  CUDF_EXPECTS(expr.get_column_index() < static_cast<cudf::size_type>(_output_dtypes.size()),
+  CUDF_EXPECTS(col_ref.get_column_index() < static_cast<cudf::size_type>(_output_dtypes.size()),
                "Column index cannot be more than number of columns in the table");
-  return expr;
 }
 
-std::reference_wrapper<ast::expression const> equality_literals_collector::visit(
-  ast::column_name_reference const& expr)
+bool equality_literals_collector::has_timestamp_scale_mismatch(cudf::size_type col_idx) const
 {
-  CUDF_FAIL("Column name reference is not supported in DictionaryAST and BloomfilterAST");
+  // A literal whose output precision differs from the column's native precision could never match
+  // the native values, so probing for it would be wasted work
+  if (_output_column_schemas.empty() or not cudf::is_timestamp(_output_dtypes[col_idx])) {
+    return false;
+  }
+  auto const& schema   = _schema_tree[_output_column_schemas[col_idx]];
+  auto const clockrate = cudf::io::detail::to_clockrate(_output_dtypes[col_idx].id());
+  return schema.logical_type.has_value() and
+         calc_timestamp_scale(schema.logical_type, clockrate) != 0;
 }
 
-std::reference_wrapper<ast::expression const> equality_literals_collector::visit(
-  ast::operation const& expr)
+maybe_pruning_expr equality_literals_collector::build_comparison(
+  ast::ast_operator op, ast::column_reference const& col_ref, ast::literal const& literal)
 {
-  using cudf::ast::ast_operator;
-
-  auto const input_op       = expr.get_operator();
-  auto const operator_arity = cudf::ast::detail::ast_operator_arity(input_op);
-
-  if (operator_arity == 1) {
-    auto const [kind, col_ref] = extract_unary_operand(expr);
-
-    if (kind == operand_kind::COLUMN_REF) {
-      col_ref->accept(*this);
-    } else {
-      std::ignore = visit_operands(expr.get_operands());
-    }
-    return expr;
+  auto const col_idx = col_ref.get_column_index();
+  if (op == ast::ast_operator::EQUAL and not has_timestamp_scale_mismatch(col_idx)) {
+    _literals[col_idx].emplace_back(const_cast<ast::literal*>(&literal));
   }
-
-  // Binary operation
-  auto const [op, lhs_kind, rhs_kind, col_ref, literal] = extract_binary_operands(expr);
-
-  if (lhs_kind == operand_kind::COLUMN_REF and rhs_kind == operand_kind::LITERAL) {
-    col_ref->accept(*this);
-    auto const col_idx = col_ref->get_column_index();
-    // Do not collect literals for timestamp columns whose output precision differs from
-    // the column's native precision as the literal would never match the native values.
-    if (not _output_column_schemas.empty() and cudf::is_timestamp(_output_dtypes[col_idx])) {
-      auto const schema_idx = _output_column_schemas[col_idx];
-      auto const& schema    = _schema_tree[schema_idx];
-      auto const clockrate  = cudf::io::detail::to_clockrate(_output_dtypes[col_idx].id());
-      if (schema.logical_type.has_value() and
-          calc_timestamp_scale(schema.logical_type, clockrate) != 0) {
-        return expr;
-      }
-    }
-    if (op == ast_operator::EQUAL) {
-      _literals[col_idx].emplace_back(const_cast<ast::literal*>(literal));
-    }
-  } else {
-    // For all other forms, visit operands to collect any nested literals
-    std::ignore = visit_operands(expr.get_operands());
-  }
-  return expr;
+  return std::nullopt;
 }
 
 std::vector<std::vector<ast::literal*>> equality_literals_collector::get_literals() &&
 {
   return std::move(_literals);
-}
-
-std::vector<std::reference_wrapper<ast::expression const>>
-equality_literals_collector::visit_operands(
-  cudf::host_span<std::reference_wrapper<ast::expression const> const> operands)
-{
-  std::vector<std::reference_wrapper<ast::expression const>> transformed_operands;
-  for (auto const& operand : operands) {
-    auto const new_operand = operand.get().accept(*this);
-    transformed_operands.push_back(new_operand);
-  }
-  return transformed_operands;
 }
 
 }  // namespace cudf::io::parquet::detail

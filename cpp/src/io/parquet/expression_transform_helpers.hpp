@@ -185,11 +185,24 @@ class pruning_expression_builder {
   }
 
   /**
+   * @brief Outcome of distributing a negation into its operand
+   *
+   * `handled` distinguishes "this builder took responsibility for the operand" from "this is not a
+   * shape the negation distributes into". It matters because `build_comparison` and
+   * `build_unary` have side effects in collecting subclasses: when a negation is handled the
+   * operand must *not* be walked again, or the collector records it twice.
+   */
+  struct negation_result {
+    bool handled;             ///< Whether the negation was distributed into the operand
+    maybe_pruning_expr expr;  ///< The rewritten expression, or std::nullopt if it relaxed
+  };
+
+  /**
    * @brief Rewrites `NOT(operand)` by distributing the negation into `operand`
    *
-   * @return The pruning expression, or std::nullopt to relax
+   * @return Whether the negation was handled, and the resulting expression if so
    */
-  [[nodiscard]] maybe_pruning_expr build_negation(ast::expression const& operand);
+  [[nodiscard]] negation_result build_negation(ast::expression const& operand);
 
   /**
    * @brief Checks that a column reference is usable by this converter
@@ -340,7 +353,7 @@ class named_to_reference_converter : public ast::detail::expression_transformer 
  * @brief Collects lists of equality predicate literals in the AST expression, one list per input
  * table column. This is used in row group filtering based on bloom filters.
  */
-class equality_literals_collector : public ast::detail::expression_transformer {
+class equality_literals_collector : public pruning_expression_builder {
  public:
   equality_literals_collector() = default;
 
@@ -350,27 +363,6 @@ class equality_literals_collector : public ast::detail::expression_transformer {
                               cudf::host_span<SchemaElement const> schema_tree             = {});
 
   /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::literal const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::literal const& expr) override;
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::column_reference const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::column_reference const& expr) override;
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::column_name_reference const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(
-    ast::column_name_reference const& expr) override;
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::operation const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::operation const& expr) override;
-
-  /**
    * @brief Vectors of equality literals in the AST expression, one per input table column
    *
    * @return Vectors of equality literals, one per input table column
@@ -378,8 +370,24 @@ class equality_literals_collector : public ast::detail::expression_transformer {
   [[nodiscard]] std::vector<std::vector<ast::literal*>> get_literals() &&;
 
  protected:
-  std::vector<std::reference_wrapper<ast::expression const>> visit_operands(
-    cudf::host_span<std::reference_wrapper<ast::expression const> const> operands);
+  /**
+   * @copydoc pruning_expression_builder::build_comparison
+   *
+   * Always relaxes - this only records the literals the bloom filter converter will probe.
+   */
+  [[nodiscard]] maybe_pruning_expr build_comparison(ast::ast_operator op,
+                                                    ast::column_reference const& col_ref,
+                                                    ast::literal const& literal) override;
+
+  /**
+   * @copydoc pruning_expression_builder::validate_column_reference
+   */
+  void validate_column_reference(ast::column_reference const& col_ref) const override;
+
+  /**
+   * @brief Whether a literal for this column would be unprobeable due to a timestamp scale mismatch
+   */
+  [[nodiscard]] bool has_timestamp_scale_mismatch(cudf::size_type col_idx) const;
 
   cudf::host_span<cudf::data_type const> _output_dtypes;
   std::vector<std::vector<ast::literal*>> _literals;

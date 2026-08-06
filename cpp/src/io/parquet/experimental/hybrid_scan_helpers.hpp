@@ -375,14 +375,6 @@ class dictionary_literals_collector : public equality_literals_collector {
   dictionary_literals_collector(ast::expression const& expr,
                                 std::span<cudf::data_type const> output_dtypes);
 
-  // Bring all overloads of `visit` from equality_literals_collector into scope
-  using equality_literals_collector::visit;
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::operation const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::operation const& expr) override;
-
   /**
    * @brief Returns vectors of collected literals and (in)equality operators in the AST expression,
    * one per input table column
@@ -393,6 +385,19 @@ class dictionary_literals_collector : public equality_literals_collector {
   [[nodiscard]] std::pair<std::vector<std::vector<ast::literal*>>,
                           std::vector<std::vector<ast::ast_operator>>>
   get_literals_and_operators() &&;
+
+ protected:
+  /**
+   * @copydoc parquet::detail::pruning_expression_builder::build_comparison
+   *
+   * Always relaxes - this only records the literal/operator pairs the dictionary converter will
+   * evaluate. Unlike the bloom filter collector this keeps `NOT_EQUAL` as well as `EQUAL`, since a
+   * dictionary can prove a row group holds nothing but a given value.
+   */
+  [[nodiscard]] parquet::detail::maybe_pruning_expr build_comparison(
+    ast::ast_operator op,
+    ast::column_reference const& col_ref,
+    ast::literal const& literal) override;
 
  private:
   std::vector<std::vector<ast::ast_operator>> _operators;
