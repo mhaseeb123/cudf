@@ -177,20 +177,14 @@ struct bloom_filter_caster {
  * @brief Converts AST expression to bloom filter membership (BloomfilterAST) expression.
  * This is used in row group filtering based on equality predicate.
  */
-class bloom_filter_expression_converter : public equality_literals_collector {
+class bloom_filter_expression_converter : public parquet::detail::pruning_expression_builder {
  public:
   bloom_filter_expression_converter(
     ast::expression const& expr,
     cudf::host_span<cudf::data_type const> output_dtypes,
-    cudf::host_span<std::vector<ast::literal*> const> equality_literals,
-    rmm::cuda_stream_view stream)
-    : _equality_literals{equality_literals},
-      _always_true_scalar{std::make_unique<cudf::numeric_scalar<bool>>(true, true, stream)},
-      _always_true{std::make_unique<ast::literal>(*_always_true_scalar)}
+    cudf::host_span<std::vector<ast::literal*> const> equality_literals)
+    : _output_dtypes{output_dtypes}, _equality_literals{equality_literals}
   {
-    // Set the output data types
-    _output_dtypes = output_dtypes;
-
     // Compute and store columns literals offsets
     _col_literals_offsets.reserve(static_cast<cudf::size_type>(_output_dtypes.size()) + 1);
     _col_literals_offsets.emplace_back(0);
@@ -203,95 +197,66 @@ class bloom_filter_expression_converter : public equality_literals_collector {
                             static_cast<cudf::size_type>(col_literal_map.size());
                    });
 
-    // Add this visitor
-    expr.accept(*this);
+    _bloom_filter_expr = build(expr);
   }
 
   /**
-   * @brief Delete equality literals getter as it's not needed in the derived class
-   */
-  [[nodiscard]] std::vector<std::vector<ast::literal*>> get_equality_literals() && = delete;
-
-  // Bring all overloads of `visit` from equality_predicate_collector into scope
-  using equality_literals_collector::visit;
-
-  /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::operation const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::operation const& expr) override
-  {
-    using cudf::ast::ast_operator;
-
-    auto const input_op       = expr.get_operator();
-    auto const operator_arity = cudf::ast::detail::ast_operator_arity(input_op);
-
-    // Unary operation
-    if (operator_arity == 1) {
-      auto visit_operands_fn = [this](auto const& operands) {
-        return this->visit_operands(operands);
-      };
-      return parquet::detail::apply_unary_membership_transform(
-        expr, _bloom_filter_expr, *_always_true, visit_operands_fn);
-    }
-
-    // Binary operation
-    auto const [op, lhs_kind, rhs_kind, col_ref, literal] = extract_binary_operands(expr);
-
-    // Push expressions for `col op lit` or `lit op col` forms
-    if (lhs_kind == operand_kind::COLUMN_REF and rhs_kind == operand_kind::LITERAL) {
-      col_ref->accept(*this);
-
-      if (op == ast_operator::EQUAL) {
-        auto const col_idx            = col_ref->get_column_index();
-        auto const& equality_literals = _equality_literals[col_idx];
-        auto col_literal_offset       = _col_literals_offsets[col_idx];
-        // Skip bloom filter probing for timestamp columns with empty vector of literals due to
-        // a timestamp scale mismatch — the literal can never match the native values.
-        if (cudf::is_timestamp(_output_dtypes[col_idx]) and equality_literals.empty()) {
-          return *_always_true;
-        }
-
-        auto const literal_iter =
-          std::find(equality_literals.cbegin(), equality_literals.cend(), literal);
-        CUDF_EXPECTS(literal_iter != equality_literals.end(),
-                     "Bloom filter expression converter encountered an unexpected literal");
-
-        col_literal_offset += std::distance(equality_literals.cbegin(), literal_iter);
-        auto const& value = _bloom_filter_expr.push(ast::column_reference{col_literal_offset});
-        _bloom_filter_expr.push(ast::operation{ast_operator::IDENTITY, value});
-      } else {
-        _bloom_filter_expr.push(ast::operation{ast_operator::IDENTITY, *_always_true});
-        return *_always_true;
-      }
-    }  // Visit operands and push expression for `expr op expr` form
-    else if (lhs_kind == operand_kind::EXPRESSION and rhs_kind == operand_kind::EXPRESSION) {
-      auto new_operands = visit_operands(expr.get_operands());
-      _bloom_filter_expr.push(ast::operation{op, new_operands.front(), new_operands.back()});
-    }  // Push _always_true for `col op col`, `expr op col`, `expr op lit` forms
-    else {
-      _bloom_filter_expr.push(ast::operation{ast_operator::IDENTITY, *_always_true});
-      return *_always_true;
-    }
-
-    return _bloom_filter_expr.back();
-  }
-
-  /**
-   * @brief Returns the AST to apply on bloom filter membership.
+   * @brief Returns the AST to apply on bloom filter membership
    *
-   * @return AST operation expression
+   * @return The BloomfilterAST expression, or std::nullopt if no row group can be pruned
    */
-  [[nodiscard]] std::reference_wrapper<ast::expression const> get_bloom_filter_expr() const
+  [[nodiscard]] parquet::detail::maybe_pruning_expr get_bloom_filter_expr() const
   {
-    return _bloom_filter_expr.back();
+    return _bloom_filter_expr;
+  }
+
+ protected:
+  /**
+   * @copydoc pruning_expression_builder::build_comparison
+   */
+  [[nodiscard]] parquet::detail::maybe_pruning_expr build_comparison(
+    ast::ast_operator op,
+    ast::column_reference const& col_ref,
+    ast::literal const& literal) override
+  {
+    // A bloom filter only answers "might this value be present", so only equality is evaluable
+    if (op != ast::ast_operator::EQUAL) { return std::nullopt; }
+
+    auto const col_idx            = col_ref.get_column_index();
+    auto const& equality_literals = _equality_literals[col_idx];
+
+    // Skip bloom filter probing for timestamp columns with empty vector of literals due to
+    // a timestamp scale mismatch - the literal can never match the native values.
+    if (cudf::is_timestamp(_output_dtypes[col_idx]) and equality_literals.empty()) {
+      return std::nullopt;
+    }
+
+    auto const literal_iter = std::find(equality_literals.cbegin(), equality_literals.cend(), &literal);
+    CUDF_EXPECTS(literal_iter != equality_literals.end(),
+                 "Bloom filter expression converter encountered an unexpected literal");
+
+    auto const col_literal_offset =
+      _col_literals_offsets[col_idx] +
+      static_cast<cudf::size_type>(std::distance(equality_literals.cbegin(), literal_iter));
+    return _tree.push(ast::column_reference{col_literal_offset});
+  }
+
+  /**
+   * @copydoc pruning_expression_builder::validate_column_reference
+   */
+  void validate_column_reference(ast::column_reference const& col_ref) const override
+  {
+    CUDF_EXPECTS(col_ref.get_table_source() == ast::table_reference::LEFT,
+                 "BloomfilterAST supports only left table");
+    CUDF_EXPECTS(col_ref.get_column_index() < static_cast<cudf::size_type>(_output_dtypes.size()),
+                 "Column index cannot be more than number of columns in the table");
   }
 
  private:
-  std::vector<cudf::size_type> _col_literals_offsets;
+  cudf::host_span<cudf::data_type const> _output_dtypes;
   cudf::host_span<std::vector<ast::literal*> const> _equality_literals;
-  ast::tree _bloom_filter_expr;
-  std::unique_ptr<cudf::numeric_scalar<bool>> _always_true_scalar;
-  std::unique_ptr<ast::literal> _always_true;
+  std::vector<cudf::size_type> _col_literals_offsets;
+  parquet::detail::maybe_pruning_expr _bloom_filter_expr;
 };
 
 }  // namespace
@@ -456,13 +421,16 @@ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::ap
 
   // Convert AST to BloomfilterAST expression with reference to bloom filter membership
   // in above `bloom_filter_membership_table`
-  bloom_filter_expression_converter bloom_filter_expr{
-    filter.get(), output_dtypes, {literals}, stream};
+  bloom_filter_expression_converter const bloom_filter_expr{filter.get(), output_dtypes, {literals}};
+
+  // Nothing in the filter can be evaluated against bloom filters, so no row group can be pruned
+  auto const bloom_filter_ast = bloom_filter_expr.get_bloom_filter_expr();
+  if (not bloom_filter_ast.has_value()) { return std::nullopt; }
 
   // Filter bloom filter membership table with the BloomfilterAST expression and collect
   // filtered row group indices
   return collect_filtered_row_group_indices(bloom_filter_membership_table,
-                                            bloom_filter_expr.get_bloom_filter_expr(),
+                                            bloom_filter_ast.value(),
                                             input_row_group_indices,
                                             stream);
 }
