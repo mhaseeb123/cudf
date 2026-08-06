@@ -249,11 +249,15 @@ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::ap
 
   // Converts AST to StatsAST with reference to min, max columns in above `stats_table`.
   stats_expression_converter const stats_expr{
-    filter.get(), static_cast<size_type>(output_dtypes.size()), has_is_null_operator, stream};
+    filter.get(), static_cast<size_type>(output_dtypes.size()), has_is_null_operator};
+
+  // Nothing in the filter can be evaluated against statistics, so no row group can be pruned
+  auto const stats_ast = stats_expr.get_stats_expr();
+  if (not stats_ast.has_value()) { return std::nullopt; }
 
   // Filter stats table with StatsAST expression and collect filtered row group indices
   return collect_filtered_row_group_indices(
-    stats_table, stats_expr.get_stats_expr(), input_row_group_indices, stream);
+    stats_table, stats_ast.value(), input_row_group_indices, stream);
 }
 
 std::pair<std::optional<std::vector<std::vector<size_type>>>, surviving_row_group_metrics>

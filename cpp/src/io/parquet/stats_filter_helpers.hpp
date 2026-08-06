@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "expression_transform_helpers.hpp"
 #include "timestamp_utils.cuh"
 
 #include <cudf/ast/detail/expression_transformer.hpp>
@@ -358,38 +359,59 @@ class stats_columns_collector : public ast::detail::expression_transformer {
  * statistics max value of a column is referenced by column_index*3+1
  * statistics is_null value of a column is referenced by column_index*3+2
  */
-class stats_expression_converter : public stats_columns_collector {
+class stats_expression_converter : public pruning_expression_builder {
  public:
   stats_expression_converter(ast::expression const& expr,
                              size_type num_columns,
-                             bool has_is_null_operator,
-                             rmm::cuda_stream_view stream);
-
-  // Bring all overrides of `visit` from stats_columns_collector into scope
-  using stats_columns_collector::visit;
+                             bool has_is_null_operator);
 
   /**
-   * @copydoc ast::detail::expression_transformer::visit(ast::operation const& )
-   */
-  std::reference_wrapper<ast::expression const> visit(ast::operation const& expr) override;
-
-  /**
-   * @brief Returns the AST to apply on Column chunk statistics.
+   * @brief Returns the AST to apply on column chunk statistics
    *
-   * @return AST operation expression
+   * @return The StatsAST expression, or std::nullopt if no row group can be pruned
    */
-  [[nodiscard]] std::reference_wrapper<ast::expression const> get_stats_expr() const;
+  [[nodiscard]] maybe_pruning_expr get_stats_expr() const { return _stats_expr; }
+
+ protected:
+  /**
+   * @copydoc pruning_expression_builder::build_comparison
+   */
+  [[nodiscard]] maybe_pruning_expr build_comparison(ast::ast_operator op,
+                                                    ast::column_reference const& col_ref,
+                                                    ast::literal const& literal) override;
 
   /**
-   * @brief Delete stats columns mask getter as it's not needed in the derived class
+   * @copydoc pruning_expression_builder::build_unary
    */
-  thrust::host_vector<bool> get_stats_columns_mask() && = delete;
+  [[nodiscard]] maybe_pruning_expr build_unary(ast::ast_operator op,
+                                               ast::column_reference const& col_ref) override;
+
+  /**
+   * @copydoc pruning_expression_builder::build_negated_unary
+   */
+  [[nodiscard]] maybe_pruning_expr build_negated_unary(
+    ast::ast_operator op, ast::column_reference const& col_ref) override;
+
+  /**
+   * @copydoc pruning_expression_builder::validate_column_reference
+   */
+  void validate_column_reference(ast::column_reference const& col_ref) const override;
 
  private:
-  ast::tree _stats_expr;
+  /// Column index of this column's statistics minimum in the stats table
+  [[nodiscard]] cudf::size_type vmin_index(ast::column_reference const& col_ref) const
+  {
+    return col_ref.get_column_index() * _stats_cols_per_column;
+  }
+  /// Column index of this column's statistics maximum in the stats table
+  [[nodiscard]] cudf::size_type vmax_index(ast::column_reference const& col_ref) const
+  {
+    return vmin_index(col_ref) + 1;
+  }
+
+  size_type _num_columns;
   cudf::size_type _stats_cols_per_column;
-  std::unique_ptr<cudf::numeric_scalar<bool>> _always_true_scalar;
-  std::unique_ptr<ast::literal> _always_true;
+  maybe_pruning_expr _stats_expr;
 };
 
 }  // namespace cudf::io::parquet::detail

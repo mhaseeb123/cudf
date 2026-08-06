@@ -113,6 +113,93 @@ template <operator_transform mode>
 }
 
 /**
+ * @brief A pruning expression, or std::nullopt when the subtree it was built from cannot be
+ * evaluated against the summary columns and is therefore unconstrained
+ */
+using maybe_pruning_expr = std::optional<std::reference_wrapper<ast::expression const>>;
+
+/**
+ * @brief Base for converters that rewrite a filter into an expression over per-row-group or
+ * per-page summary columns
+ *
+ * The built expression answers "might some row in this row group satisfy the filter?" - `true`
+ * keeps the row group, `false` prunes it. A subtree that cannot be answered from the summary
+ * columns is *relaxed*: `build()` returns std::nullopt for it and the parent treats it as
+ * unconstrained. std::nullopt at the top means no pruning is possible at all, and the caller
+ * should skip the filter entirely.
+ *
+ * Because a leaf is an existential rather than the predicate's truth value, only conjunctions and
+ * disjunctions combine meaningfully. Every other combining operator relaxes - negating or
+ * comparing existential summaries does not answer the same question the filter asks.
+ */
+class pruning_expression_builder {
+ public:
+  pruning_expression_builder()                                             = default;
+  virtual ~pruning_expression_builder()                                    = default;
+  pruning_expression_builder(pruning_expression_builder const&)            = delete;
+  pruning_expression_builder& operator=(pruning_expression_builder const&) = delete;
+
+ protected:
+  /**
+   * @brief Builds the pruning expression for `expr`, relaxing whatever cannot be evaluated
+   *
+   * @param expr Expression to rewrite
+   * @return The pruning expression, or std::nullopt to relax
+   */
+  [[nodiscard]] maybe_pruning_expr build(ast::expression const& expr);
+
+  /**
+   * @brief Rewrites a `col op lit` comparison into an expression over the summary columns
+   *
+   * `lit op col` forms are normalized to `col op lit` before this is called.
+   *
+   * @return The pruning expression, or std::nullopt to relax
+   */
+  [[nodiscard]] virtual maybe_pruning_expr build_comparison(ast::ast_operator op,
+                                                            ast::column_reference const& col_ref,
+                                                            ast::literal const& literal) = 0;
+
+  /**
+   * @brief Rewrites an `op col` unary operation into an expression over the summary columns
+   *
+   * @return The pruning expression, or std::nullopt to relax
+   */
+  [[nodiscard]] virtual maybe_pruning_expr build_unary(ast::ast_operator,
+                                                       ast::column_reference const&)
+  {
+    return std::nullopt;
+  }
+
+  /**
+   * @brief Rewrites `NOT(op col)` into an expression over the summary columns
+   *
+   * Defaults to relaxing. Override only where the summary column for `op` is *exact* rather than
+   * existential, because negating an existential answers a different question than the filter asks.
+   *
+   * @return The pruning expression, or std::nullopt to relax
+   */
+  [[nodiscard]] virtual maybe_pruning_expr build_negated_unary(ast::ast_operator,
+                                                               ast::column_reference const&)
+  {
+    return std::nullopt;
+  }
+
+  /**
+   * @brief Rewrites `NOT(operand)` by distributing the negation into `operand`
+   *
+   * @return The pruning expression, or std::nullopt to relax
+   */
+  [[nodiscard]] maybe_pruning_expr build_negation(ast::expression const& operand);
+
+  /**
+   * @brief Checks that a column reference is usable by this converter
+   */
+  virtual void validate_column_reference(ast::column_reference const& col_ref) const = 0;
+
+  ast::tree _tree;  ///< Owns the nodes of the built expression
+};
+
+/**
  * @brief Handle unary operation transform for membership-based row group filters. i.e., bloom
  * filter and dictionary page filter.
  *

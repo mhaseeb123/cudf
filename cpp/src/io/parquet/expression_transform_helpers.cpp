@@ -137,6 +137,107 @@ std::reference_wrapper<ast::expression const> named_to_reference_converter::visi
   return std::reference_wrapper<ast::expression const>(_col_ref.back());
 }
 
+maybe_pruning_expr pruning_expression_builder::build_negation(ast::expression const& operand)
+{
+  auto const* child = dynamic_cast<ast::operation const*>(&operand);
+  if (child == nullptr) { return std::nullopt; }
+
+  auto const child_op = child->get_operator();
+
+  // `NOT(op col)`. Only the derived converter knows whether its summary column for `op` is exact
+  // enough to negate
+  if (cudf::ast::detail::ast_operator_arity(child_op) == 1) {
+    auto const [kind, col_ref] = extract_unary_operand(*child);
+    if (kind != operand_kind::COLUMN_REF) { return std::nullopt; }
+    validate_column_reference(*col_ref);
+    return build_negated_unary(child_op, *col_ref);
+  }
+
+  // `NOT(col op lit)` is `col negated_op lit`, which the converter can rewrite directly
+  auto const [op, lhs_kind, rhs_kind, col_ref, literal] = extract_binary_operands(*child);
+  if (lhs_kind != operand_kind::COLUMN_REF or rhs_kind != operand_kind::LITERAL) {
+    return std::nullopt;
+  }
+  auto const negated_op = transform_operator<operator_transform::NEGATE>(op);
+  if (not negated_op.has_value()) { return std::nullopt; }
+
+  validate_column_reference(*col_ref);
+  return build_comparison(negated_op.value(), *col_ref, *literal);
+}
+
+maybe_pruning_expr pruning_expression_builder::build(ast::expression const& expr)
+{
+  using cudf::ast::ast_operator;
+
+  // A bare column reference or literal carries no summary of its own
+  if (auto const* col_ref = dynamic_cast<ast::column_reference const*>(&expr);
+      col_ref != nullptr) {
+    validate_column_reference(*col_ref);
+    return std::nullopt;
+  }
+  if (dynamic_cast<ast::literal const*>(&expr) != nullptr) { return std::nullopt; }
+  CUDF_EXPECTS(dynamic_cast<ast::column_name_reference const*>(&expr) == nullptr,
+               "Column name references are not supported in Parquet pruning expressions");
+
+  auto const& operation = dynamic_cast<ast::operation const&>(expr);
+  auto const input_op   = operation.get_operator();
+  auto const operands   = operation.get_operands();
+
+  // Unary operation
+  if (cudf::ast::detail::ast_operator_arity(input_op) == 1) {
+    auto const [kind, col_ref] = extract_unary_operand(operation);
+    if (kind == operand_kind::COLUMN_REF) {
+      validate_column_reference(*col_ref);
+      return build_unary(input_op, *col_ref);
+    }
+    // `NOT` distributes into a comparison or a unary operation over a column reference
+    if (input_op == ast_operator::NOT) {
+      if (auto const negated = build_negation(operands.front().get()); negated.has_value()) {
+        return negated;
+      }
+    }
+
+    // Walk the operand to validate its column references, then relax. The operand's value is an
+    // existential summary of the row group, and no unary operator is meaning-preserving over one
+    std::ignore = build(operands.front().get());
+    return std::nullopt;
+  }
+
+  // Binary operation, with `lit op col` normalized to `col op lit`
+  auto const [op, lhs_kind, rhs_kind, col_ref, literal] = extract_binary_operands(operation);
+  if (lhs_kind == operand_kind::COLUMN_REF and rhs_kind == operand_kind::LITERAL) {
+    validate_column_reference(*col_ref);
+    return build_comparison(op, *col_ref, *literal);
+  }
+
+  // Build both operands unconditionally so that their column references are validated even when
+  // the combination below relaxes
+  auto const lhs = build(operands.front().get());
+  auto const rhs = build(operands.back().get());
+
+  switch (input_op) {
+    // An unconstrained conjunct constrains nothing, so drop it and keep the other side
+    case ast_operator::LOGICAL_AND: [[fallthrough]];
+    case ast_operator::NULL_LOGICAL_AND: {
+      if (lhs.has_value() and rhs.has_value()) {
+        return _tree.push(ast::operation{input_op, lhs.value(), rhs.value()});
+      }
+      return lhs.has_value() ? lhs : rhs;
+    }
+    // An unconstrained disjunct leaves the whole disjunction unconstrained
+    case ast_operator::LOGICAL_OR: [[fallthrough]];
+    case ast_operator::NULL_LOGICAL_OR: {
+      if (lhs.has_value() and rhs.has_value()) {
+        return _tree.push(ast::operation{input_op, lhs.value(), rhs.value()});
+      }
+      return std::nullopt;
+    }
+    // Every other operator combines the operands' *values*, but the operands here are existential
+    // summaries. Comparing or arithmetically combining them does not answer the filter's question
+    default: return std::nullopt;
+  }
+}
+
 std::optional<std::reference_wrapper<ast::expression const>>
 named_to_reference_converter::push_down_negation(ast::expression const& operand)
 {
