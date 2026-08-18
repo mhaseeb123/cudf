@@ -18,7 +18,7 @@
 #include <cudf/utilities/traits.hpp>
 #include <cudf/utilities/type_dispatcher.hpp>
 
-#include <thrust/iterator/counting_iterator.h>
+#include <cuda/iterator>
 
 #include <algorithm>
 #include <functional>
@@ -48,7 +48,7 @@ struct row_group_stats_caster : public stats_caster_base {
     tuple<std::unique_ptr<column>, std::unique_ptr<column>, std::optional<std::unique_ptr<column>>>
     operator()(host_span<int const> per_source_schema_indices,
                cudf::data_type dtype,
-               rmm::cuda_stream_view stream,
+               cuda::stream_ref stream,
                rmm::device_async_resource_ref mr) const
   {
     // List, Struct, Dictionary types are not supported
@@ -146,14 +146,9 @@ bool aggregate_reader_metadata::any_row_group_stats_available(
 
       auto const& first_row_group =
         per_file_metadata[src_idx].row_groups[row_group_indices.front()];
-      auto const num_col_chunks    = static_cast<size_type>(first_row_group.columns.size());
       auto const mapped_schema_idx = map_schema_index(schema_idx, static_cast<int>(src_idx));
-      auto const cached_offset     = colchunk_offset.value_or(-1);
-
-      if (cached_offset < 0 or cached_offset >= num_col_chunks or
-          first_row_group.columns[cached_offset].schema_idx != mapped_schema_idx) {
-        colchunk_offset = find_colchunk_iter_offset(first_row_group, mapped_schema_idx);
-      }
+      colchunk_offset =
+        find_colchunk_iter_offset(first_row_group, mapped_schema_idx, colchunk_offset);
 
       if (colchunk_has_stats(first_row_group.columns[colchunk_offset.value()])) { return true; }
     }
@@ -167,7 +162,7 @@ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::ap
   host_span<data_type const> output_dtypes,
   host_span<int const> output_column_schemas,
   std::reference_wrapper<ast::expression const> filter,
-  rmm::cuda_stream_view stream) const
+  cuda::stream_ref stream) const
 {
   auto mr = cudf::get_current_device_resource_ref();
 
@@ -269,7 +264,7 @@ aggregate_reader_metadata::filter_row_groups(
   host_span<data_type const> output_dtypes,
   host_span<int const> output_column_schemas,
   std::reference_wrapper<ast::expression const> filter,
-  rmm::cuda_stream_view stream) const
+  cuda::stream_ref stream) const
 {
   // Apply stats filtering on input row groups
   auto const stats_filtered_row_groups = apply_stats_filters(input_row_group_indices,
