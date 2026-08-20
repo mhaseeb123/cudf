@@ -129,9 +129,6 @@ void hybrid_scan_reader_impl::setup_next_pass(
       set_pass_page_mask(data_page_mask);
     }
 
-    // Establish the logical mask before malformed-page checks, size estimation, or subpass setup.
-    set_pass_page_mask(data_page_mask);
-
     // detect malformed columns.
     // - we have seen some cases in the wild where we have a row group containing N
     //   rows, but the total number of rows in the pages for column X is != N. while it

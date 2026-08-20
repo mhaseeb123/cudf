@@ -345,8 +345,8 @@ std::tuple<std::unique_ptr<cudf::table>, std::unique_ptr<cudf::table>> sparse_ch
       ? reader->build_row_mask_with_page_index_stats(current_row_group_indices, options, stream, mr)
       : reader->build_all_true_row_mask(current_row_group_indices, stream, mr);
 
-  auto filter_tables  = std::vector<std::unique_ptr<cudf::table>>{};
-  auto payload_tables = std::vector<std::unique_ptr<cudf::table>>{};
+  auto filter_tables            = std::vector<std::unique_ptr<cudf::table>>{};
+  auto payload_tables           = std::vector<std::unique_ptr<cudf::table>>{};
   std::size_t rows_materialized = 0;
   auto const materialize_pass   = [&](cudf::host_span<cudf::size_type const> row_group_indices) {
     auto const rows_in_pass = reader->total_rows_in_row_groups(row_group_indices);
@@ -390,9 +390,8 @@ std::tuple<std::unique_ptr<cudf::table>, std::unique_ptr<cudf::table>> sparse_ch
       cudf::io::parquet::fetch_byte_ranges_to_device_async(
         datasource, payload_page_ranges, stream, mr);
     payload_tasks.get();
-    auto const page_data_per_source =
-      std::vector<std::vector<cudf::device_span<uint8_t const>>>{{payload_data.begin(),
-                                                                    payload_data.end()}};
+    auto const page_data_per_source = std::vector<std::vector<cudf::device_span<uint8_t const>>>{
+      {payload_data.begin(), payload_data.end()}};
     reader->setup_chunking_for_payload_columns(
       1024,
       10240,
