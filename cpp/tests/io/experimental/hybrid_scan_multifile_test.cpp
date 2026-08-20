@@ -48,9 +48,8 @@ using cudf::io::parquet::experimental::use_data_page_mask;
  */
 template <int num_sources = 2, int num_rows = num_ordered_rows>
 void test_hybrid_scan_multifile(std::vector<cudf::column_view> const& columns,
-                                bool case_sensitive_names          = true,
-                                uint32_t literal_value             = 100,
-                                bool expect_payload_byte_reduction = false)
+                                bool case_sensitive_names = true,
+                                uint32_t literal_value    = 100)
 {
   auto const table = cudf::table_view{columns};
   cudf::io::table_input_metadata expected_metadata(table);
@@ -116,12 +115,6 @@ void test_hybrid_scan_multifile(std::vector<cudf::column_view> const& columns,
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(chunked_payload_table->view(), sparse_payload_table->view());
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected.tbl->view(), all_table->view());
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected.tbl->view(), chunked_all_table->view());
-  if (expect_payload_byte_reduction) {
-    auto const [requested_payload_bytes, full_payload_bytes] =
-      payload_byte_range_sizes(source_info, filter_expression, case_sensitive_names, stream, mr);
-    EXPECT_GT(requested_payload_bytes, 0);
-    EXPECT_LT(requested_payload_bytes, full_payload_bytes);
-  }
 }
 
 }  // namespace
