@@ -42,10 +42,11 @@ import java.util.Arrays;
  * page-level pruning: skips decode of pages the filter (or row mask) proves empty. Enable when the
  * workload prunes many pages. Pruning requirements for the two column materializations differ:
  * <ul>
- *   <li>Filter columns seed the row mask from page-index statistics, so
- *       {@link #setupPageIndex(HostMemoryBuffer)} must have been called first.</li>
- *   <li>Payload columns only need page row boundaries. These come from the
- *       {@code OffsetIndex} when page index has been set up, otherwise from the decoded page headers as fallback.</li>
+ *   <li>With page-level pruning enabled, filter columns require
+ *       {@link #setupPageIndex(HostMemoryBuffer)} to seed the row mask from page-index
+ *       statistics.</li>
+ *   <li>Once a row mask exists, filter and payload columns use page row boundaries from the
+ *       {@code OffsetIndex} when available, otherwise from decoded page headers.</li>
  * </ul>
  *
  * <p>The reader is created with no filter expression installed. Filter-related APIs
@@ -201,8 +202,8 @@ public class HybridScanReader implements AutoCloseable {
 
   /**
    * Materialize the {@code ColumnIndex} / {@code OffsetIndex} structs (collectively, the page
-   * index) from the supplied bytes. Required before any filter or payload column materialization
-   * call with {@code usePageLevelPruning == true}.
+   * index) from the supplied bytes. Required before any filter column materialization with
+   * {@code usePageLevelPruning == true}.
    *
    * @param pageIndexBuffer host-resident page index bytes
    */
