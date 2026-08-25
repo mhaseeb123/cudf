@@ -442,6 +442,12 @@ cudf::column_view set_nulls_to_true(cudf::mutable_column_view const& row_mask,
     row_mask.type(), row_mask.size(), row_mask.head(), nullptr, 0, row_mask.offset()};
 }
 
+bool are_all_rows_retained(cudf::column_view const& row_mask, cuda::stream_ref stream)
+{
+  return cudf::detail::all_of(
+    row_mask.begin<bool>(), row_mask.end<bool>(), cuda::std::identity{}, stream);
+}
+
 thrust::host_vector<bool> compute_row_range_selection_mask(
   cudf::column_view const& row_mask,
   std::span<cudf::size_type const> page_row_offsets,
@@ -451,15 +457,7 @@ thrust::host_vector<bool> compute_row_range_selection_mask(
   // Need at least two offsets (or one range) to search the Fenwick tree
   if (page_row_offsets.size() < 2) return thrust::host_vector<bool>{};
 
-  auto const total_rows = row_mask.size();
-  // Return early if all rows are needed.
-  if (cudf::detail::all_of(row_mask.begin<bool>(),
-                           row_mask.begin<bool>() + total_rows,
-                           cuda::std::identity{},
-                           stream)) {
-    return thrust::host_vector<bool>{};
-  }
-
+  auto const total_rows         = row_mask.size();
   auto const mr                 = cudf::get_current_device_resource_ref();
   auto const tree_level_offsets = compute_fenwick_tree_level_offsets(total_rows, max_page_size);
   auto const num_levels         = static_cast<cudf::size_type>(tree_level_offsets.size());

@@ -1514,9 +1514,12 @@ void hybrid_scan_reader_impl::set_pass_page_mask(std::span<bool const> data_page
 
 thrust::host_vector<bool> hybrid_scan_reader_impl::compute_data_page_mask_with_page_headers()
 {
-  auto& pass = *_pass_itm_data;
-  pass.pages.device_to_host_async(_stream);
-  _stream.sync();
+  auto const& pass = *_pass_itm_data;
+
+  // Return an empty vector if all rows are required
+  if (parquet::detail::are_all_rows_retained(_row_mask, _stream)) {
+    return thrust::host_vector<bool>(0);
+  }
 
   std::vector<cudf::size_type> page_row_offsets;
   page_row_offsets.reserve(pass.pages.size() * 2);
