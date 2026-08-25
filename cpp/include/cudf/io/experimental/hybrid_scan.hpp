@@ -564,7 +564,7 @@ class hybrid_scan_reader {
    *
    * @param row_group_indices Input row groups indices
    * @param column_chunk_data Device spans of column chunk data of filter columns
-   * @param[in,out] row_mask Mutable boolean column indicating surviving rows from page pruning
+   * @param[in,out] row_mask Mutable boolean column indicating surviving rows
    * @param mask_data_pages Whether to build and use a data page mask using the row mask
    * @param options Parquet reader options
    * @param stream CUDA stream used for device memory operations and kernel launches
@@ -645,7 +645,7 @@ class hybrid_scan_reader {
    * @param pass_read_limit Limit on the memory used for reading and decompressing data. `0` if
    * there is no limit
    * @param row_group_indices Input row groups indices
-   * @param row_mask Boolean column indicating which rows need to be read
+   * @param[in,out] row_mask Mutable boolean column indicating surviving rows
    * @param mask_data_pages Whether to build and use a data page mask using the row mask
    * @param column_chunk_data Device spans of column chunk data of filter columns
    * @param options Parquet reader options
@@ -656,7 +656,7 @@ class hybrid_scan_reader {
     std::size_t chunk_read_limit,
     std::size_t pass_read_limit,
     std::span<size_type const> row_group_indices,
-    cudf::column_view const& row_mask,
+    cudf::mutable_column_view const& row_mask,
     use_data_page_mask mask_data_pages,
     std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
     parquet_reader_options const& options,

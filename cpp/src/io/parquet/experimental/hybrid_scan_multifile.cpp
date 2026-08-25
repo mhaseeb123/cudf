@@ -197,7 +197,7 @@ void hybrid_scan_multifile::setup_chunking_for_filter_columns(
   std::size_t chunk_read_limit,
   std::size_t pass_read_limit,
   cudf::host_span<std::vector<size_type> const> row_group_indices,
-  cudf::column_view const& row_mask,
+  cudf::mutable_column_view const& row_mask,
   use_data_page_mask mask_data_pages,
   cudf::host_span<cudf::device_span<uint8_t const> const> column_chunk_data,
   parquet_reader_options const& options,

@@ -830,7 +830,7 @@ cdef class HybridScanReader:
         row_group_indices : list[int]
             Input row group indices
         row_mask : Column
-            Boolean column indicating surviving rows
+            Mutable boolean column indicating surviving rows
         mask_data_pages : UseDataPageMask
             Whether to use a data page mask
         column_chunk_data : Sequence
@@ -853,7 +853,7 @@ cdef class HybridScanReader:
         # keep reference to avoid use-after-free of device spans
         self._filter_chunk_data = column_chunk_data
 
-        cdef column_view mask_view = row_mask.view()
+        cdef mutable_column_view mask_view = row_mask.mutable_view()
         with nogil:
             self.c_obj.get()[0].setup_chunking_for_filter_columns(
                 chunk_read_limit,

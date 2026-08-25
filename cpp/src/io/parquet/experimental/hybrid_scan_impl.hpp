@@ -253,7 +253,7 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
     std::size_t chunk_read_limit,
     std::size_t pass_read_limit,
     std::span<std::vector<size_type> const> row_group_indices,
-    cudf::column_view const& row_mask,
+    cudf::mutable_column_view const& row_mask,
     use_data_page_mask mask_data_pages,
     std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
     parquet_reader_options const& options,
@@ -393,6 +393,11 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
    * @param page_data Span of device spans of sparse page data
    */
   void set_sparse_pass_page_mask(std::span<cudf::device_span<uint8_t const> const> page_data);
+
+  /**
+   * @brief Compute a data page mask from the decoded page headers.
+   */
+  [[nodiscard]] thrust::host_vector<bool> compute_data_page_mask_with_page_headers();
 
   /**
    * @brief Select the columns to be read based on the read mode
@@ -616,6 +621,7 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
 
   std::optional<std::vector<std::string>> _filter_columns_names;
 
+  cudf::column_view _row_mask{};
   cudf::size_type _row_mask_offset{0};
   bool _output_chunk_produced{false};
 

@@ -509,7 +509,8 @@ TEST_F(HybridScanFiltersTest, FilterRowGroupsWithComplexExpressions)
     auto input_row_group_indices = reader->all_row_groups(options);
     auto stats_filtered          = reader->filter_row_groups_with_stats(
       input_row_group_indices, options, cudf::get_default_stream());
-    EXPECT_EQ(stats_filtered.size(), 2);
+    auto const expected = std::vector<cudf::size_type>{1, 2};
+    EXPECT_EQ(stats_filtered, expected);
   }
 
   // Filter: NOT(NOT(col0 < 100) OR col0 > 150)
@@ -907,10 +908,11 @@ TEST_F(HybridScanFiltersTest, OffsetIndexOnlyDataPageMask)
   auto const expected = cudf::apply_boolean_mask(written_table->view(), row_mask_view, stream, mr);
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected->view(), result.tbl->view());
 
-  // Without offset index, data-page pruning falls back to decoding all pages.
+  // Without an offset index, data-page pruning derives page ranges from decoded page headers.
   for (auto& row_group : metadata.row_groups) {
     for (auto& column : row_group.columns) {
       column.offset_index.reset();
+      ASSERT_FALSE(column.offset_index.has_value());
     }
   }
   auto no_index_reader = cudf::io::parquet::experimental::hybrid_scan_reader(metadata, options);
