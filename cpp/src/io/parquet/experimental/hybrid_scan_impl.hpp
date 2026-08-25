@@ -400,6 +400,16 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
   [[nodiscard]] thrust::host_vector<bool> compute_data_page_mask_with_page_headers();
 
   /**
+   * @brief Mark output buffers nullable when page pruning synthesizes null rows
+   */
+  void mark_buffers_nullable_for_pruned_pages();
+
+  /**
+   * @brief Initialize the mutable output-buffer template for this materialization
+   */
+  void reset_output_buffers_template();
+
+  /**
    * @brief Select the columns to be read based on the read mode
    *
    * @param read_columns_mode Read mode indicating if we are reading filter or payload columns
@@ -622,6 +632,9 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
   std::optional<std::vector<std::string>> _filter_columns_names;
 
   cudf::column_view _row_mask{};
+
+  std::vector<cudf::io::detail::inline_column_buffer> _original_output_buffers_template;
+
   cudf::size_type _row_mask_offset{0};
   bool _output_chunk_produced{false};
 
