@@ -465,7 +465,7 @@ template std::unique_ptr<cudf::table> hybrid_scan<false, false>(
   std::optional<cudf::ast::operation const>,
   std::unordered_set<hybrid_scan_filter_type> const&,
   bool,
-  rmm::cuda_stream_view,
+  cuda::stream_ref,
   rmm::device_async_resource_ref);
 
 template std::unique_ptr<cudf::table> hybrid_scan<false, true>(

@@ -28,6 +28,8 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.List;
 import java.util.function.Consumer;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -610,7 +612,7 @@ public class HybridScanReaderTest extends CudfTestBase {
           "Fixture must have no page index so the header-derived fallback is exercised");
       int[] survived = reader.filterRowGroupsWithStats(reader.allRowGroups());
       assertArrayEquals(new int[]{1}, survived,
-          "Group 0 (zip_code 0–59,999) cannot satisfy zip_code > 100,000");
+          "Group 0 (zip_code 0-59,999) cannot satisfy zip_code > 100,000");
       DeviceMemoryBuffer[] filterCols = copyRangesToDevice(
           open.file, reader.filterColumnChunksByteRanges(survived));
       DeviceMemoryBuffer[] payloadCols = copyRangesToDevice(
@@ -887,7 +889,7 @@ public class HybridScanReaderTest extends CudfTestBase {
         }
         try (ColumnVector rowMask = reader.takeFilterRowMask()) {
           assertEquals(60000L, rowMask.getRowCount(), "Mask spans row group 1");
-          assertEquals(19999L, countTrue(rowMask), "zip_code 100,001–119,999 survive");
+          assertEquals(19999L, countTrue(rowMask), "zip_code 100,001-119,999 survive");
           reader.setupChunkingForPayloadColumns(0L, 0L, survived, rowMask, true, payloadCols);
           long total = 0;
           while (reader.hasNextTableChunk()) {
@@ -930,7 +932,7 @@ public class HybridScanReaderTest extends CudfTestBase {
         }
         try (ColumnVector rowMask = reader.takeFilterRowMask()) {
           assertEquals(60000L, rowMask.getRowCount(), "Mask spans the row group");
-          assertEquals(29999L, countTrue(rowMask), "zip_code 30,001–59,999 survive");
+          assertEquals(29999L, countTrue(rowMask), "zip_code 30,001-59,999 survive");
           reader.setupChunkingForPayloadColumns(0L, 0L, survived, rowMask, true, payloadCols);
           long total = 0;
           while (reader.hasNextTableChunk()) {
@@ -1359,7 +1361,7 @@ public class HybridScanReaderTest extends CudfTestBase {
       return openFromFile(pq, "id", "zip_code", "list_values");
     }
 
-    private static OpenReader openFromFile(File pq, String[] cols) throws IOException {
+    private static OpenReader openFromFile(File pq, String... cols) throws IOException {
       HostMemoryBuffer file = readFileToHostBuffer(pq);
       HostMemoryBuffer footer = null;
       HybridScanReader reader = null;
@@ -1499,6 +1501,7 @@ public class HybridScanReaderTest extends CudfTestBase {
    * Writes one 60,000-row group with a list payload column. Each row holds three values, so
    * leaf-page boundaries can fall within a logical row.
    */
+  @SuppressWarnings("unchecked")
   private static void writeNoPageIndexListParquet(File path) {
     int rows = 60_000;
     ParquetWriterOptions opts = ParquetWriterOptions.builder()
@@ -1506,9 +1509,10 @@ public class HybridScanReaderTest extends CudfTestBase {
         .withRowGroupSizeRows(rows)
         .withStatisticsFrequency(ParquetWriterOptions.StatisticsFrequency.PAGE)
         .build();
-    Object[] listRows = IntStream.range(0, rows)
-        .mapToObj(i -> java.util.List.of(i * 3, i * 3 + 1, i * 3 + 2))
-        .toArray();
+    List<Integer>[] listRows = (List<Integer>[]) new List<?>[rows];
+    for (int i = 0; i < rows; i++) {
+      listRows[i] = Arrays.asList(i * 3, i * 3 + 1, i * 3 + 2);
+    }
     try (ColumnVector id = ColumnVector.fromInts(IntStream.range(0, rows).toArray());
          ColumnVector zipCode = ColumnVector.fromInts(IntStream.range(0, rows).toArray());
          ColumnVector listValues = ColumnVector.fromLists(LIST_OF_INTS, listRows);
