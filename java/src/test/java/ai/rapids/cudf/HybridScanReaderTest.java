@@ -1505,7 +1505,10 @@ public class HybridScanReaderTest extends CudfTestBase {
   private static void writeNoPageIndexListParquet(File path) {
     int rows = 60_000;
     ParquetWriterOptions opts = ParquetWriterOptions.builder()
-        .withNonNullableColumns("id", "zip_code", "list_values")
+        .withNonNullableColumns("id", "zip_code")
+        .withListColumn(ColumnWriterOptions.listBuilder("list_values", false)
+            .withNonNullableColumns("element")
+            .build())
         .withRowGroupSizeRows(rows)
         .withStatisticsFrequency(ParquetWriterOptions.StatisticsFrequency.PAGE)
         .build();
