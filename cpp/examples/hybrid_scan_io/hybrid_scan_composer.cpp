@@ -426,7 +426,6 @@ std::unique_ptr<cudf::table> hybrid_scan(
   }
 }
 
-
 // Instantiations for hybrid_scan template
 
 template std::unique_ptr<cudf::table> hybrid_scan<true, false>(
