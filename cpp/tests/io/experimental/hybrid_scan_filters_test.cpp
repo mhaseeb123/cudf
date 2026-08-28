@@ -905,7 +905,8 @@ TEST_F(HybridScanFiltersTest, OffsetIndexOnlyDataPageMask)
     options,
     stream,
     mr);
-  auto const expected = cudf::apply_boolean_mask(written_table->view(), row_mask_view, stream, mr);
+  auto const expected =
+    cudf::apply_retention_mask(written_table->view(), row_mask_view, stream, mr);
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected->view(), result.tbl->view());
 
   // Without an offset index, data-page pruning derives page ranges from decoded page headers.
