@@ -769,7 +769,7 @@ thrust::host_vector<bool> aggregate_reader_metadata::compute_data_page_mask(
     row_mask.null_count() == 0, "Row mask must not contain nulls", std::invalid_argument);
 
   // Return an empty vector if all rows are required
-  if (are_all_rows_selected(row_mask, stream)) { return thrust::host_vector<bool>{}; }
+  if (are_all_rows_retained(row_mask, stream)) { return thrust::host_vector<bool>{}; }
 
   // Collect column schema indices from the input columns.
   auto column_schema_indices = std::vector<size_type>(input_columns.size());

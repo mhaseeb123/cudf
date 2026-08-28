@@ -933,6 +933,55 @@ TEST_F(HybridScanFiltersTest, OffsetIndexOnlyDataPageMask)
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected->view(), no_index_result.tbl->view());
 }
 
+TEST_F(HybridScanFiltersTest, NoOffsetIndexListColumns)
+{
+  // List pages cannot safely be mapped to rows from page headers alone, because a leaf page may
+  // begin in the middle of a list row. Verify the header-derived fallback retains correct output.
+  using T = uint32_t;
+  std::mt19937 gen(0xc0c0a);
+  auto list_col    = make_list_str_column(gen, false, false);
+  auto scalar_col  = testdata::ascending<T>();
+  auto list_table  = cudf::table_view{{scalar_col, *list_col}};
+  auto list_buffer = std::vector<char>{};
+  auto list_writer =
+    cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&list_buffer}, list_table)
+      .row_group_size_rows(num_ordered_rows)
+      .max_page_size_rows(page_size_for_ordered_tests)
+      .stats_level(cudf::io::statistics_freq::STATISTICS_COLUMN)
+      .build();
+  cudf::io::write_parquet(list_writer);
+
+  auto const list_datasource = cudf::io::datasource::create(cudf::host_span<std::byte const>(
+    reinterpret_cast<std::byte const*>(list_buffer.data()), list_buffer.size()));
+  auto const list_footer     = cudf::io::parquet::fetch_footer_to_host(*list_datasource);
+  auto options               = cudf::io::parquet_reader_options::builder().build();
+  auto list_reader = cudf::io::parquet::experimental::hybrid_scan_reader(*list_footer, options);
+  auto const list_row_groups      = list_reader.all_row_groups(options);
+  auto const list_row_mask_values = cudf::detail::make_counting_transform_iterator(
+    0, [](auto const row) { return std::cmp_less(row, num_ordered_rows / 2); });
+  auto list_row_mask = cudf::test::fixed_width_column_wrapper<bool>(
+    list_row_mask_values, list_row_mask_values + num_ordered_rows);
+  auto const list_row_mask_view = static_cast<cudf::column_view>(list_row_mask);
+  auto const stream             = cudf::get_default_stream();
+  auto const mr                 = cudf::get_current_device_resource_ref();
+  auto const list_byte_ranges =
+    list_reader.payload_column_chunks_byte_ranges(list_row_groups, options);
+  auto [list_buffers, list_data, list_tasks] = cudf::io::parquet::fetch_byte_ranges_to_device_async(
+    *list_datasource, list_byte_ranges, stream, mr);
+  list_tasks.get();
+
+  auto const list_result = list_reader.materialize_payload_columns(
+    list_row_groups,
+    list_data,
+    list_row_mask_view,
+    cudf::io::parquet::experimental::use_data_page_mask::YES,
+    options,
+    stream,
+    mr);
+  auto const list_expected = cudf::apply_boolean_mask(list_table, list_row_mask_view, stream, mr);
+  CUDF_TEST_EXPECT_TABLES_EQUIVALENT(list_expected->view(), list_result.tbl->view());
+}
+
 template <typename T>
 struct TimestampPageFiltering : public HybridScanFiltersTest {};
 

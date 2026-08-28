@@ -38,6 +38,8 @@ import java.util.stream.Stream;
 public class HybridScanReaderTest extends CudfTestBase {
 
   private static final String[] DEFAULT_COLS = {"id", "zip_code", "num_units"};
+  private static final HostColumnVector.ListType LIST_OF_INTS =
+      new HostColumnVector.ListType(true, new HostColumnVector.BasicType(true, DType.INT32));
   private static final int[] ALL_ROW_GROUPS = {0, 1, 2};
 
   // --------------------------------------------------------------------
@@ -904,6 +906,49 @@ public class HybridScanReaderTest extends CudfTestBase {
     }
   }
 
+  /**
+   * Verifies that list payload columns remain readable when header-derived page pruning is used.
+   * List leaf pages may start mid-row, so they must not be pruned without an offset index.
+   */
+  @Test
+  void testMaterializePayloadColumnsChunkListPagePruningWithoutPageIndex(@TempDir Path tmp)
+      throws IOException {
+    try (OpenReader open = OpenReader.multiPageWithList(tmp)
+             .withFilter("zip_code", BinaryOperator.GREATER, 30000)) {
+      HybridScanReader reader = open.reader;
+      assertEquals(0L, reader.pageIndexByteRange().size(),
+          "Fixture must have no page index so the header-derived fallback is exercised");
+      int[] survived = reader.filterRowGroupsWithStats(reader.allRowGroups());
+      DeviceMemoryBuffer[] filterCols = copyRangesToDevice(
+          open.file, reader.filterColumnChunksByteRanges(survived));
+      DeviceMemoryBuffer[] payloadCols = copyRangesToDevice(
+          open.file, reader.payloadColumnChunksByteRanges(survived));
+      try {
+        reader.setupChunkingForFilterColumns(0L, 0L, survived, false, filterCols);
+        while (reader.hasNextTableChunk()) {
+          reader.materializeFilterColumnsChunk().close();
+        }
+        try (ColumnVector rowMask = reader.takeFilterRowMask()) {
+          assertEquals(60000L, rowMask.getRowCount(), "Mask spans the row group");
+          assertEquals(29999L, countTrue(rowMask), "zip_code 30,001–59,999 survive");
+          reader.setupChunkingForPayloadColumns(0L, 0L, survived, rowMask, true, payloadCols);
+          long total = 0;
+          while (reader.hasNextTableChunk()) {
+            try (Table chunk = reader.materializePayloadColumnsChunk(rowMask)) {
+              assertEquals(2, chunk.getNumberOfColumns());
+              total += chunk.getRowCount();
+            }
+          }
+          assertEquals(29999L, total,
+              "Header-derived pruning must retain all selected rows with list payloads");
+        }
+      } finally {
+        closeAll(filterCols);
+        closeAll(payloadCols);
+      }
+    }
+  }
+
   // --------------------------------------------------------------------
   // Tests: setupChunkingForAllColumns() / materializeAllColumnsChunk()
   //
@@ -1307,6 +1352,13 @@ public class HybridScanReaderTest extends CudfTestBase {
       return openFromFile(pq, DEFAULT_COLS);
     }
 
+    /** A 60,000-row group with list payloads spanning multiple leaf pages. */
+    static OpenReader multiPageWithList(Path tmp) throws IOException {
+      File pq = tmp.resolve("fixture.parquet").toFile();
+      writeNoPageIndexListParquet(pq);
+      return openFromFile(pq, "id", "zip_code", "list_values");
+    }
+
     private static OpenReader openFromFile(File pq, String[] cols) throws IOException {
       HostMemoryBuffer file = readFileToHostBuffer(pq);
       HostMemoryBuffer footer = null;
@@ -1440,6 +1492,29 @@ public class HybridScanReaderTest extends CudfTestBase {
           writer.write(t);
         }
       }
+    }
+  }
+
+  /**
+   * Writes one 60,000-row group with a list payload column. Each row holds three values, so
+   * leaf-page boundaries can fall within a logical row.
+   */
+  private static void writeNoPageIndexListParquet(File path) {
+    int rows = 60_000;
+    ParquetWriterOptions opts = ParquetWriterOptions.builder()
+        .withNonNullableColumns("id", "zip_code", "list_values")
+        .withRowGroupSizeRows(rows)
+        .withStatisticsFrequency(ParquetWriterOptions.StatisticsFrequency.PAGE)
+        .build();
+    Object[] listRows = IntStream.range(0, rows)
+        .mapToObj(i -> java.util.List.of(i * 3, i * 3 + 1, i * 3 + 2))
+        .toArray();
+    try (ColumnVector id = ColumnVector.fromInts(IntStream.range(0, rows).toArray());
+         ColumnVector zipCode = ColumnVector.fromInts(IntStream.range(0, rows).toArray());
+         ColumnVector listValues = ColumnVector.fromLists(LIST_OF_INTS, listRows);
+         Table table = new Table(id, zipCode, listValues);
+         TableWriter writer = Table.writeParquetChunked(opts, path)) {
+      writer.write(table);
     }
   }
 

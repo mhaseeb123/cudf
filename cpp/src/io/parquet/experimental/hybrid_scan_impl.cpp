@@ -8,8 +8,8 @@
 #include "cudf/io/text/byte_range_info.hpp"
 #include "hybrid_scan_helpers.hpp"
 #include "io/parquet/reader_impl_chunking_utils.cuh"
-#include "page_index_filter_utils.hpp"
 #include "io/parquet/synthetic_column_helpers.hpp"
+#include "page_index_filter_utils.hpp"
 
 #include <cudf/copying.hpp>
 #include <cudf/detail/stream_compaction.hpp>
@@ -1388,9 +1388,9 @@ table_with_metadata hybrid_scan_reader_impl::finalize_output(
   // Prepend the source and row index columns to filter columns only
   if (read_columns_mode == read_columns_mode::FILTER_COLUMNS) {
     if (_options.prepend_row_index_column) {
-      out_columns.emplace(
-        out_columns.begin(),
-        synthesize_row_index_column(_file_itm_data.row_groups, read_info, _stream, _mr));
+      out_columns.emplace(out_columns.begin(),
+                          parquet::detail::synthesize_row_index_column(
+                            _file_itm_data.row_groups, read_info, _stream, _mr));
       out_metadata.schema_info.emplace(out_metadata.schema_info.begin(),
                                        column_name_info{.name = "row_index", .is_nullable = false});
     }
@@ -1519,9 +1519,7 @@ thrust::host_vector<bool> hybrid_scan_reader_impl::compute_data_page_mask_with_p
   auto const& pass = *_pass_itm_data;
 
   // Return an empty vector if all rows are required
-  if (parquet::detail::are_all_rows_retained(_row_mask, _stream)) {
-    return thrust::host_vector<bool>(0);
-  }
+  if (are_all_rows_retained(_row_mask, _stream)) { return thrust::host_vector<bool>(0); }
 
   std::vector<cudf::size_type> page_row_offsets;
   page_row_offsets.reserve(pass.pages.size() * 2);
@@ -1551,7 +1549,7 @@ thrust::host_vector<bool> hybrid_scan_reader_impl::compute_data_page_mask_with_p
     max_page_size         = std::max<cudf::size_type>(max_page_size, page_end - page_start);
 
     // Starting a new column chunk. Push page start row
-    if (previous_chunk_idx == -1 or page.chunk_idx != previous_chunk_idx) {
+    if (page.chunk_idx != previous_chunk_idx) {
       page_row_offsets.push_back(page_start);
       previous_chunk_idx = page.chunk_idx;
     }
