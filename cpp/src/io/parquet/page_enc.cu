@@ -164,8 +164,8 @@ void __device__ calculate_frag_size(frag_init_state_s* const s, int t)
   size_t len       = 0;
   for (uint32_t i = 0; i < nvals; i += block_size) {
     auto const val_idx  = start_value_idx + i + t;
-    auto const is_valid = i + t < nvals && val_idx < s->col.leaf_column->size() &&
-                          s->col.leaf_column->is_valid(val_idx);
+    auto const row      = s->frag.start_row + i + t;
+    auto const is_valid = i + t < nvals && is_valid_data(s->col, row, val_idx);
     if (is_valid) {
       num_valid++;
       len += dtype_len;
@@ -337,10 +337,8 @@ __device__ uint8_t const* delta_encode(page_enc_state_s<0>* s, uint64_t* buffer,
     size_type const val_idx_in_block = cur_val_idx + t;
     size_type const val_idx          = s->page_start_val + val_idx_in_block;
 
-    bool const is_valid =
-      (val_idx < s->col.leaf_column->size() && val_idx_in_block < s->page.num_leaf_values)
-        ? s->col.leaf_column->is_valid(val_idx)
-        : false;
+    bool const is_valid = val_idx_in_block < s->page.num_leaf_values &&
+                          is_valid_data(s->col, s->page.start_row + val_idx_in_block, val_idx);
 
     cur_val_idx += nvals;
 
@@ -1677,11 +1675,9 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
       } else {
         size_type const val_idx_in_leaf_col = s->page_start_val + val_idx_in_block;
 
-        is_valid = (val_idx_in_leaf_col < s->col.leaf_column->size() &&
-                    val_idx_in_block < s->page.num_leaf_values)
-                     ? s->col.leaf_column->is_valid(val_idx_in_leaf_col)
-                     : 0;
-        val_idx  = val_idx_in_leaf_col;
+        is_valid = val_idx_in_block < s->page.num_leaf_values &&
+                   is_valid_data(s->col, s->page.start_row + val_idx_in_block, val_idx_in_leaf_col);
+        val_idx = val_idx_in_leaf_col;
       }
       return cuda::std::make_tuple(is_valid, val_idx);
     }();
@@ -1916,10 +1912,9 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
       size_type const val_idx_in_block    = cur_val_idx + t;
       size_type const val_idx_in_leaf_col = s->page_start_val + val_idx_in_block;
 
-      uint32_t const is_valid = (val_idx_in_leaf_col < s->col.leaf_column->size() &&
-                                 val_idx_in_block < s->page.num_leaf_values)
-                                  ? s->col.leaf_column->is_valid(val_idx_in_leaf_col)
-                                  : 0;
+      uint32_t const is_valid =
+        val_idx_in_block < s->page.num_leaf_values &&
+        is_valid_data(s->col, s->page.start_row + val_idx_in_block, val_idx_in_leaf_col);
       // need to test for use_dictionary because it might be boolean
       uint32_t const val_idx =
         (s->ck.use_dictionary) ? val_idx_in_leaf_col - s->chunk_start_val : val_idx_in_leaf_col;
@@ -2136,7 +2131,7 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
     if (s->page.num_valid != 0) {
       for (uint32_t idx = 0; idx < s->page.num_leaf_values; idx++) {
         size_type const idx_in_col = s->page_start_val + idx;
-        if (s->col.leaf_column->is_valid(idx_in_col)) {
+        if (is_valid_data(s->col, s->page.start_row + idx, idx_in_col)) {
           if (type_id == type_id::STRING) {
             first_string = reinterpret_cast<uint8_t const*>(
               s->col.leaf_column->element<string_view>(idx_in_col).data());
@@ -2158,10 +2153,8 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
     size_type const val_idx_in_block = cur_val_idx + t;
     size_type const val_idx          = s->page_start_val + val_idx_in_block;
 
-    bool const is_valid =
-      (val_idx < s->col.leaf_column->size() && val_idx_in_block < s->page.num_leaf_values)
-        ? s->col.leaf_column->is_valid(val_idx)
-        : false;
+    bool const is_valid = val_idx_in_block < s->page.num_leaf_values &&
+                          is_valid_data(s->col, s->page.start_row + val_idx_in_block, val_idx);
 
     cur_val_idx += nvals;
 
@@ -2303,9 +2296,8 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
     // create the validity array
     for (int idx = t; idx < s->page.num_leaf_values; idx += block_size) {
       size_type const idx_in_col = s->page_start_val + idx;
-      bool const is_valid =
-        idx_in_col < s->col.leaf_column->size() and s->col.leaf_column->is_valid(idx_in_col);
-      forward_map[idx] = is_valid ? 1 : 0;
+      bool const is_valid        = is_valid_data(s->col, s->page.start_row + idx, idx_in_col);
+      forward_map[idx]           = is_valid ? 1 : 0;
     }
     __syncthreads();
 
@@ -2315,8 +2307,7 @@ CUDF_KERNEL void __launch_bounds__(block_size, 8)
     // now reverse map to get valid_idx -> leaf_idx mapping
     for (int idx = t; idx < s->page.num_leaf_values; idx += block_size) {
       size_type const idx_in_col = s->page_start_val + idx;
-      bool const is_valid =
-        idx_in_col < s->col.leaf_column->size() and s->col.leaf_column->is_valid(idx_in_col);
+      bool const is_valid        = is_valid_data(s->col, s->page.start_row + idx, idx_in_col);
       if (is_valid) { offsets_map[forward_map[idx]] = idx; }
     }
     __syncthreads();

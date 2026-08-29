@@ -85,6 +85,34 @@ inline size_type __device__ row_to_value_idx(size_type idx,
 }
 
 /**
+ * @brief Check whether a leaf value is defined by both its own validity and its struct ancestors.
+ */
+inline __device__ bool is_valid_data(parquet_column_device_view const& parquet_col,
+                                     size_type row,
+                                     size_type value_idx)
+{
+  auto const& leaf = *parquet_col.leaf_column;
+  if (value_idx >= leaf.size() or not leaf.is_valid(value_idx)) { return false; }
+
+  // List definition levels are precomputed by `get_dremel_data`. Their leaves may not map
+  // one-to-one to their ancestors so retain the existing leaf-validity behavior for this path.
+  if (parquet_col.level_offsets != nullptr) { return true; }
+
+  auto col        = *parquet_col.parent_column;
+  size_type level = 0;
+
+  // Walk down struct hierarchy and return false if any ancestor is null
+  while (col.type().id() == type_id::STRUCT) {
+    if (parquet_col.nullability[level] and not col.is_valid(row)) { return false; }
+    row += col.offset();  // rebase onto the sliced child
+    col = col.child(0);
+    ++level;
+  }
+
+  return true;
+}
+
+/**
  * @brief Insert chunk values into their respective hash maps
  *
  * @param map_storage Bulk hashmap storage
