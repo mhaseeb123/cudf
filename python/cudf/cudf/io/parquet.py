@@ -738,6 +738,8 @@ def read_parquet_metadata(
         storage_options=storage_options,
         filesystem=filesystem,
         bytes_per_thread=None,
+        # Only the footer is needed, so avoid pulling whole remote files
+        prefetch_options={"method": "parquet-footer"},
     )
 
     parquet_metadata = plc.io.parquet_metadata.read_parquet_metadata(

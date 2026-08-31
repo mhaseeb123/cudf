@@ -2394,6 +2394,74 @@ def _get_remote_bytes_parquet(
     return buffers
 
 
+# Parquet file layout:
+#   [4-byte "PAR1" header][data][footer][4-byte footer length]["PAR1"]
+_PARQUET_MAGIC = b"PAR1"
+_PARQUET_HEADER_LEN = 4
+_PARQUET_ENDER_LEN = 8
+# Mirrors libcudf's LIBCUDF_PARQUET_METADATA_SIZE_HINT default. Footers smaller
+# than this are fetched in a single round trip.
+_PARQUET_FOOTER_SIZE_HINT = 64 * 1024
+
+
+def _get_remote_bytes_parquet_footer(remote_paths, fs, **kwargs):
+    """Fetch only the Parquet footer of each remote file.
+
+    Returns one buffer per path, shaped as ``PAR1 + <footer> + <ender>`` -- a
+    self-contained miniature Parquet file. libcudf locates the footer relative
+    to the *end* of a source, so these parse identically to the real files
+    while transferring O(footer) rather than O(file) bytes.
+
+    Falls back to fetching a whole file for any input that does not look like
+    Parquet, so that libcudf still reports its usual error.
+    """
+    sizes = list(fs.sizes(remote_paths))
+    hint = max(_PARQUET_FOOTER_SIZE_HINT, _PARQUET_ENDER_LEN)
+    tails = fs.cat_ranges(
+        remote_paths, [max(0, size - hint) for size in sizes], sizes
+    )
+
+    buffers: list[bytes | None] = [None] * len(remote_paths)
+    # (index, start, end, prepend_magic) for paths needing a second round trip
+    refetch: list[tuple[int, int, int, bool]] = []
+
+    for i, (tail, size) in enumerate(zip(tails, sizes, strict=True)):
+        if (
+            size <= _PARQUET_HEADER_LEN + _PARQUET_ENDER_LEN
+            or tail[-_PARQUET_HEADER_LEN:] != _PARQUET_MAGIC
+        ):
+            # Not a Parquet file we can shortcut; hand libcudf the whole thing
+            refetch.append((i, 0, size, False))
+            continue
+
+        footer_len = int.from_bytes(
+            tail[-_PARQUET_ENDER_LEN:-_PARQUET_HEADER_LEN], "little"
+        )
+        needed = footer_len + _PARQUET_ENDER_LEN
+        if needed > size:
+            # Corrupt footer length; let libcudf produce the error
+            refetch.append((i, 0, size, False))
+        elif needed <= len(tail):
+            buffers[i] = _PARQUET_MAGIC + tail[-needed:]
+        else:
+            # Footer is larger than the speculative tail read
+            refetch.append((i, size - needed, size, True))
+
+    if refetch:
+        idx = [r[0] for r in refetch]
+        chunks = fs.cat_ranges(
+            [remote_paths[i] for i in idx],
+            [r[1] for r in refetch],
+            [r[2] for r in refetch],
+        )
+        for (i, _, _, prepend_magic), chunk in zip(
+            refetch, chunks, strict=True
+        ):
+            buffers[i] = _PARQUET_MAGIC + chunk if prepend_magic else chunk
+
+    return buffers
+
+
 def _prefetch_remote_buffers(
     paths,
     fs,
@@ -2406,12 +2474,13 @@ def _prefetch_remote_buffers(
         try:
             prefetcher = {
                 "parquet": _get_remote_bytes_parquet,
+                "parquet-footer": _get_remote_bytes_parquet_footer,
                 "all": _get_remote_bytes_all,
             }[method]
         except KeyError:
             raise ValueError(
                 f"{method} is not a supported remote-data prefetcher."
-                " Expected 'parquet' or 'all'."
+                " Expected 'parquet', 'parquet-footer' or 'all'."
             )
         return prefetcher(
             paths,
