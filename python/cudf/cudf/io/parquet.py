@@ -264,6 +264,7 @@ def _write_parquet(
     max_dictionary_size: int | None = None,
     partitions_info=None,
     storage_options=None,
+    filesystem=None,
     force_nullable_schema: bool = False,
     header_version: Literal["1.0", "2.0"] = "1.0",
     use_dictionary: bool = True,
@@ -303,7 +304,10 @@ def _write_parquet(
 
     paths_or_bufs = [
         ioutils.get_writer_filepath_or_buffer(
-            path_or_data=path, mode="wb", storage_options=storage_options
+            path_or_data=path,
+            mode="wb",
+            storage_options=storage_options,
+            filesystem=filesystem,
         )
         for path in paths
     ]
@@ -365,6 +369,7 @@ def write_to_dataset(
     max_page_size_bytes: int | None = None,
     max_page_size_rows: int | None = None,
     storage_options=None,
+    filesystem=None,
     force_nullable_schema: bool = False,
     header_version: Literal["1.0", "2.0"] = "1.0",
     use_dictionary: bool = True,
@@ -484,6 +489,9 @@ def write_to_dataset(
         be written uncompressed.
     """
 
+    if filesystem is not None:
+        ioutils._validate_filesystem(filesystem, storage_options)
+        fs = fs if fs is not None else filesystem
     fs = ioutils._ensure_filesystem(fs, root_path, storage_options)
     fs.mkdirs(root_path, exist_ok=True)
 
@@ -511,6 +519,7 @@ def write_to_dataset(
             index=preserve_index,
             partition_offsets=part_offsets,
             storage_options=storage_options,
+            filesystem=filesystem,
             metadata_file_path=metadata_file_path,
             statistics=statistics,
             int96_timestamps=int96_timestamps,
@@ -540,6 +549,7 @@ def write_to_dataset(
             compression=compression,
             index=preserve_index,
             storage_options=storage_options,
+            filesystem=filesystem,
             metadata_file_path=metadata_file_path,
             statistics=statistics,
             int96_timestamps=int96_timestamps,
@@ -786,7 +796,7 @@ def _process_dataset(
 
     # Deal with case that the user passed in a directory name
     file_list = paths
-    if len(paths) == 1 and ioutils.is_directory(paths[0]):
+    if len(paths) == 1 and ioutils.is_directory(paths[0], filesystem=fs):
         paths = ioutils.stringify_pathlike(paths[0])
     elif (
         filters is None
@@ -1534,6 +1544,7 @@ def to_parquet(
     max_page_size_rows: int | None = None,
     max_dictionary_size: int | None = None,
     storage_options=None,
+    filesystem=None,
     return_metadata: bool = False,
     force_nullable_schema: bool = False,
     header_version: Literal["1.0", "2.0"] = "1.0",
@@ -1604,6 +1615,7 @@ def to_parquet(
                 max_page_size_rows=max_page_size_rows,
                 return_metadata=return_metadata,
                 storage_options=storage_options,
+                filesystem=filesystem,
                 force_nullable_schema=force_nullable_schema,
                 header_version=header_version,
                 use_dictionary=use_dictionary,
@@ -1635,6 +1647,7 @@ def to_parquet(
             max_dictionary_size=max_dictionary_size,
             partitions_info=partition_info,
             storage_options=storage_options,
+            filesystem=filesystem,
             force_nullable_schema=force_nullable_schema,
             header_version=header_version,
             use_dictionary=use_dictionary,
@@ -1670,6 +1683,9 @@ def to_parquet(
             )
         # Type ignore: mypy complains about potential duplicate arguments from *args
         # but our API design allows passing additional args/kwargs to pyarrow
+        if filesystem is not None:
+            ioutils._validate_filesystem(filesystem, storage_options)
+            kwargs["filesystem"] = filesystem
         return pq.write_to_dataset(  # type: ignore[misc]
             pa_table,
             root_path=path,
@@ -2106,6 +2122,7 @@ class ParquetDatasetWriter:
         max_file_size=None,
         file_name_prefix=None,
         storage_options=None,
+        filesystem=None,
     ) -> None:
         if isinstance(path, str) and path.startswith("s3://"):
             self.fs_meta = {"is_s3": True, "actual_path": path}
@@ -2131,6 +2148,9 @@ class ParquetDatasetWriter:
         # in self._chunked_writers for reverse lookup
         self.path_cw_map: dict[str, int] = {}
         self.storage_options = storage_options
+        if filesystem is not None:
+            ioutils._validate_filesystem(filesystem, storage_options)
+        self.filesystem = filesystem
         self.filename = file_name_prefix
         self.max_file_size = max_file_size
         if max_file_size is not None:
@@ -2153,7 +2173,14 @@ class ParquetDatasetWriter:
             partition_cols=self.partition_cols,
             preserve_index=self.common_args["index"],
         )
-        fs = ioutils._ensure_filesystem(None, self.path, None)
+        if self.fs_meta.get("is_s3", False):
+            # `self.path` is a local temporary directory here; the upload to S3
+            # happens in `close()` using the configured filesystem.
+            fs = ioutils._ensure_filesystem(None, self.path, None)
+        else:
+            fs = ioutils._ensure_filesystem(
+                self.filesystem, self.path, self.storage_options
+            )
         fs.mkdirs(self.path, exist_ok=True)
 
         full_paths = []
@@ -2293,7 +2320,9 @@ class ParquetDatasetWriter:
             local_path = self.path
             s3_path = self.fs_meta["actual_path"]
             s3_file, _ = ioutils._get_filesystem_and_paths(
-                s3_path, storage_options=self.storage_options
+                s3_path,
+                storage_options=self.storage_options,
+                filesystem=self.filesystem,
             )
             s3_file.put(local_path, s3_path, recursive=True)
             shutil.rmtree(self.path)

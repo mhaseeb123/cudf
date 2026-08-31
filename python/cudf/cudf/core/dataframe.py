@@ -7827,6 +7827,7 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
         max_page_size_bytes=None,
         max_page_size_rows=None,
         storage_options=None,
+        filesystem=None,
         return_metadata=False,
         use_dictionary=True,
         header_version="1.0",
@@ -7857,6 +7858,7 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
             max_page_size_bytes=max_page_size_bytes,
             max_page_size_rows=max_page_size_rows,
             storage_options=storage_options,
+            filesystem=filesystem,
             return_metadata=return_metadata,
             use_dictionary=use_dictionary,
             header_version=header_version,
@@ -7890,6 +7892,7 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
         lineterminator=None,
         chunksize=None,
         storage_options=None,
+        filesystem=None,
     ):
         """{docstring}"""
         from cudf.io import csv
@@ -7909,6 +7912,7 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
             encoding=encoding,
             compression=compression,
             storage_options=storage_options,
+            filesystem=filesystem,
             quoting=quoting,
         )
 
@@ -7923,6 +7927,7 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
         row_index_stride=None,
         cols_as_map_type=None,
         storage_options=None,
+        filesystem=None,
         index=None,
     ):
         """{docstring}"""
@@ -7938,6 +7943,7 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
             row_index_stride=row_index_stride,
             cols_as_map_type=cols_as_map_type,
             storage_options=storage_options,
+            filesystem=filesystem,
             index=index,
         )
 
