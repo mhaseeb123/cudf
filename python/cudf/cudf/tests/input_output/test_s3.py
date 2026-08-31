@@ -369,6 +369,52 @@ def test_read_parquet_metadata_fetches_footer_only(
     assert max(fetched) < size / 100
 
 
+def test_read_parquet_metadata_footer_is_one_request_per_file(
+    s3_bucket_public, s3so, pdf
+):
+    """Footers are fetched with a single concurrent suffix read per file.
+
+    A size lookup would add an extra HEAD request per file, which matters when
+    collecting footers across many files.
+    """
+    import s3fs
+
+    n_files = 5
+    buffer = BytesIO()
+    pdf.to_parquet(path=buffer)
+    for i in range(n_files):
+        buffer.seek(0)
+        s3_bucket_public.put_object(
+            Key=f"footer_reqs_{i}.parquet", Body=buffer
+        )
+
+    fs = get_fs_token_paths("s3://", storage_options=s3so)[0]
+    fs.invalidate_cache()
+    paths = [
+        f"{s3_bucket_public.name}/footer_reqs_{i}.parquet"
+        for i in range(n_files)
+    ]
+
+    calls = []
+    original = s3fs.core.S3FileSystem._call_s3
+
+    async def spy(self, method, *args, **kwargs):
+        calls.append(method)
+        return await original(self, method, *args, **kwargs)
+
+    s3fs.core.S3FileSystem._call_s3 = spy
+    try:
+        buffers = cudf.utils.ioutils._get_remote_bytes_parquet_footer(
+            paths, fs
+        )
+    finally:
+        s3fs.core.S3FileSystem._call_s3 = original
+
+    assert len(buffers) == n_files
+    assert calls.count("get_object") == n_files
+    assert "head_object" not in calls
+
+
 def test_read_parquet_multi_file(s3_bucket_public, s3so, pdf):
     fname_1 = "test_parquet_reader_multi_file_1.parquet"
     buffer_1 = BytesIO()

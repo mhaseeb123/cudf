@@ -2412,51 +2412,55 @@ def _get_remote_bytes_parquet_footer(remote_paths, fs, **kwargs):
     to the *end* of a source, so these parse identically to the real files
     while transferring O(footer) rather than O(file) bytes.
 
-    Falls back to fetching a whole file for any input that does not look like
-    Parquet, so that libcudf still reports its usual error.
+    Falls back to handing libcudf a whole file for any input that does not
+    look like Parquet, so that it still reports its usual error.
     """
-    sizes = list(fs.sizes(remote_paths))
     hint = max(_PARQUET_FOOTER_SIZE_HINT, _PARQUET_ENDER_LEN)
-    tails = fs.cat_ranges(
-        remote_paths, [max(0, size - hint) for size in sizes], sizes
-    )
+    n = len(remote_paths)
 
-    buffers: list[bytes | None] = [None] * len(remote_paths)
-    # (index, start, end, prepend_magic) for paths needing a second round trip
-    refetch: list[tuple[int, int, int, bool]] = []
+    # Suffix ranges (negative start, per the fsspec `cat_file` contract) let us
+    # skip a size lookup, which would otherwise cost an extra request per file.
+    # `cat_ranges` fans out concurrently on async filesystems.
+    tails = fs.cat_ranges(remote_paths, [-hint] * n, [None] * n)
 
-    for i, (tail, size) in enumerate(zip(tails, sizes, strict=True)):
+    buffers: list[bytes | None] = [None] * n
+    # (index, start, prepend_magic) for paths needing a second round trip
+    refetch: list[tuple[int, int, bool]] = []
+
+    for i, tail in enumerate(tails):
         if (
-            size <= _PARQUET_HEADER_LEN + _PARQUET_ENDER_LEN
+            len(tail) <= _PARQUET_HEADER_LEN + _PARQUET_ENDER_LEN
             or tail[-_PARQUET_HEADER_LEN:] != _PARQUET_MAGIC
         ):
-            # Not a Parquet file we can shortcut; hand libcudf the whole thing
-            refetch.append((i, 0, size, False))
+            # Not a Parquet file we can shortcut. A short tail is already the
+            # whole file, so only a truncated one needs re-reading.
+            if len(tail) < hint:
+                buffers[i] = tail
+            else:
+                refetch.append((i, 0, False))
             continue
 
         footer_len = int.from_bytes(
             tail[-_PARQUET_ENDER_LEN:-_PARQUET_HEADER_LEN], "little"
         )
         needed = footer_len + _PARQUET_ENDER_LEN
-        if needed > size:
-            # Corrupt footer length; let libcudf produce the error
-            refetch.append((i, 0, size, False))
-        elif needed <= len(tail):
+        if needed <= len(tail):
             buffers[i] = _PARQUET_MAGIC + tail[-needed:]
+        elif len(tail) < hint:
+            # Tail is the entire file, so `footer_len` is bogus. Hand the file
+            # over unmodified and let libcudf report the corruption.
+            buffers[i] = tail
         else:
             # Footer is larger than the speculative tail read
-            refetch.append((i, size - needed, size, True))
+            refetch.append((i, -needed, True))
 
     if refetch:
-        idx = [r[0] for r in refetch]
         chunks = fs.cat_ranges(
-            [remote_paths[i] for i in idx],
-            [r[1] for r in refetch],
-            [r[2] for r in refetch],
+            [remote_paths[i] for i, _, _ in refetch],
+            [start for _, start, _ in refetch],
+            [None] * len(refetch),
         )
-        for (i, _, _, prepend_magic), chunk in zip(
-            refetch, chunks, strict=True
-        ):
+        for (i, _, prepend_magic), chunk in zip(refetch, chunks, strict=True):
             buffers[i] = _PARQUET_MAGIC + chunk if prepend_magic else chunk
 
     return buffers
