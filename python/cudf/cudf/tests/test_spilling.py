@@ -520,6 +520,17 @@ def test_df_transpose(manager: SpillManager):
     assert df2._data._data[1].data.owner.spillable
 
 
+def test_memory_usage_of_sliced_nested_column(manager: SpillManager):
+    # Sizing a sliced list column reads its offsets from device memory, which
+    # must not permanently expose (and thus unspill) the underlying buffers.
+    ser = cudf.Series([[1, 2], [3, 4], [5, 6]])[1:]
+    assert ser.memory_usage() == 44
+    for child_index in range(2):
+        buf = ser._column.plc_column.child(child_index).data()
+        assert not buf.owner.exposed
+        assert buf.owner.spillable
+
+
 def test_as_buffer_of_spillable_buffer(manager: SpillManager):
     data = cupy.arange(10, dtype="u1")
     b1 = as_buffer(data)
