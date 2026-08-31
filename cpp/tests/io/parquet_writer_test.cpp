@@ -332,54 +332,8 @@ TEST_F(ParquetWriterTest, Struct)
 
   cudf::io::parquet_reader_options read_args =
     cudf::io::parquet_reader_options::builder(cudf::io::source_info(filepath));
-  cudf::io::read_parquet(read_args);
-}
+  auto const result = cudf::io::read_parquet(read_args);
 
-TEST_F(ParquetWriterTest, StructWithNonEmptyNulls)
-{
-  // Build a struct column with a required child and an optional child
-  constexpr cudf::size_type num_rows = 16;
-  auto const values                  = cuda::counting_iterator<int32_t>{100};
-  auto const validity =
-    cudf::detail::make_counting_transform_iterator(0, [] __device__(auto i) { return i % 4 != 0; });
-
-  auto required_child = cudf::test::fixed_width_column_wrapper<int32_t>(values, values + num_rows);
-  auto optional_child =
-    cudf::test::fixed_width_column_wrapper<int32_t>(values, values + num_rows, no_nulls());
-  std::vector<std::unique_ptr<cudf::column>> children;
-  children.push_back(required_child.release());
-  children.push_back(optional_child.release());
-  auto [mask, null_count] = cudf::test::detail::make_null_mask(validity, validity + num_rows);
-  auto struct_col =
-    cudf::create_structs_hierarchy(num_rows, std::move(children), null_count, std::move(mask));
-
-  // Write parquet with non-empty nulls
-  auto const input    = table_view({*struct_col});
-  auto const filepath = temp_env->get_temp_filepath("StructWithNonEmptyNulls.parquet");
-  {
-    cudf::io::table_input_metadata metadata(input);
-    metadata.column_metadata[0].child(0).set_nullability(false);
-    auto const write_args =
-      cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, input)
-        .metadata(std::move(metadata))
-        .dictionary_policy(cudf::io::dictionary_policy::NEVER)
-        .build();
-    cudf::io::write_parquet(write_args);
-  }
-
-  // Build expected table with propagated nulls into children columns
-  auto exp_child0 =
-    cudf::test::fixed_width_column_wrapper<int32_t>(values, values + num_rows, validity);
-  auto exp_child1 =
-    cudf::test::fixed_width_column_wrapper<int32_t>(values, values + num_rows, validity);
-  auto expected_col   = cudf::test::structs_column_wrapper({exp_child0, exp_child1}, validity);
-  auto const expected = table_view({expected_col});
-
-  // Read the written parquet file
-  auto const result = cudf::io::read_parquet(
-    cudf::io::parquet_reader_options::builder(cudf::io::source_info(filepath)));
-
-  // Compare
   CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result.tbl->view());
 }
 

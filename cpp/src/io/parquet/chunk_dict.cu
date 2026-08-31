@@ -133,8 +133,8 @@ struct map_insert_fn {
         size_type uniq_elem_size = 0;
 
         // Check if this index is valid.
-        auto const row      = frag->start_row + val_idx - start_value_idx;
-        auto const is_valid = val_idx < end_value_idx and is_valid_data(*col, row, val_idx);
+        auto const is_valid =
+          val_idx < end_value_idx and val_idx < data_col.size() and data_col.is_valid(val_idx);
 
         // Insert fragment index to hash map using a single thread (for best performance for now)
         // and count successful insertions.
@@ -215,8 +215,7 @@ struct map_find_fn {
   template <typename T>
   __device__ void operator()(size_type const start_value_idx,
                              size_type const end_value_idx,
-                             size_type const ck_start_val_idx,
-                             size_type const start_row)
+                             size_type const ck_start_val_idx)
   {
     if constexpr (column_device_view::has_element_accessor<T>()) {
       auto const col       = chunk->col_desc;
@@ -243,8 +242,7 @@ struct map_find_fn {
       // Note: Adjust the following loop to use `cg::tiles<map_cg_size>` if needed in the future.
       for (key_type val_idx = start_value_idx + t; val_idx < end_value_idx; val_idx += block_size) {
         // Find the key using a single thread for best performance for now.
-        auto const row = start_row + val_idx - start_value_idx;
-        if (is_valid_data(*col, row, val_idx)) {
+        if (data_col.is_valid(val_idx)) {
           auto const found_slot = map_find_ref.find(val_idx);
           // Fail if we didn't find the previously inserted key.
           cudf_assert(found_slot != map_find_ref.end() &&
@@ -416,8 +414,7 @@ CUDF_KERNEL void __launch_bounds__(block_size)
                   map_find_fn<block_size>{storage_ref, chunk},
                   start_value_idx,
                   end_value_idx,
-                  ck_start_val_idx,
-                  start_row);
+                  ck_start_val_idx);
 }
 
 /**
@@ -466,8 +463,7 @@ CUDF_KERNEL void __launch_bounds__(DEFAULT_BLOCK_SIZE)
     auto const val_idx = chunk_start_val + i;
     // Null rows leave `dict_index` undefined; gate the read with the column's validity bitmap to
     // avoid pulling garbage bits into the max.
-    auto const row = page.start_row + val_idx - page_start_val;
-    if (val_idx < leaf_size && is_valid_data(*col, row, val_idx)) {
+    if (val_idx < leaf_size && leaf_col.is_valid(val_idx)) {
       lane_max = cuda::std::max(lane_max, dict_index[i]);
     }
   }
