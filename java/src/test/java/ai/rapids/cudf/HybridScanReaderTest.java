@@ -250,11 +250,11 @@ public class HybridScanReaderTest extends CudfTestBase {
   }
 
   // --------------------------------------------------------------------
-  // Tests: secondaryFiltersByteRanges()
+  // Tests: dictionaryPagesByteRanges() / bloomFiltersByteRanges()
   // --------------------------------------------------------------------
 
   /**
-   * Verifies secondaryFiltersByteRanges() returns one non-empty dictionary-page range per
+   * Verifies dictionaryPagesByteRanges() returns one non-empty dictionary-page range per
    * row group when all three required conditions are met:
    * <ul>
    *   <li>The filter contains an (in)equality predicate (num_units == 2);
@@ -267,12 +267,11 @@ public class HybridScanReaderTest extends CudfTestBase {
    * Result: 3 row groups × 1 dict-eligible filter col = 3 non-empty ranges.
    */
   @Test
-  void testSecondaryFiltersByteRangesPresentForLowCardinality(@TempDir Path tmp) throws IOException {
+  void testDictionaryPagesByteRangesPresentForLowCardinality(@TempDir Path tmp) throws IOException {
     try (OpenReader open = OpenReader.pageIndex(tmp).withFilter("num_units", BinaryOperator.EQUAL, 2)) {
       open.withPageIndex();
       HybridScanReader reader = open.reader;
-      SecondaryFilterRanges sfr = reader.secondaryFiltersByteRanges(reader.allRowGroups());
-      ByteRange[] dict = sfr.dictionaryPageRanges();
+      ByteRange[] dict = reader.dictionaryPagesByteRanges(reader.allRowGroups());
       assertEquals(3, dict.length, "3 row groups × 1 dict-eligible filter column");
       for (ByteRange r : dict) {
         assertTrue(r.size() > 0, "Dictionary page range must be non-empty");
@@ -281,7 +280,7 @@ public class HybridScanReaderTest extends CudfTestBase {
   }
 
   /**
-   * Verifies secondaryFiltersByteRanges() returns no dictionary-page ranges for a
+   * Verifies dictionaryPagesByteRanges() returns no dictionary-page ranges for a
    * high-cardinality int filter column even when the conditions for dictionary lookup
    * are otherwise satisfied: the fixture has a page index (COLUMN stats) and the
    * predicate is EQUAL. The empty result must be attributable solely to the writer's
@@ -289,30 +288,28 @@ public class HybridScanReaderTest extends CudfTestBase {
    * (zip_code is unique per row).
    */
   @Test
-  void testSecondaryFiltersByteRangesEmptyForHighCardinalityInts(@TempDir Path tmp) throws IOException {
+  void testDictionaryPagesByteRangesEmptyForHighCardinalityInts(@TempDir Path tmp) throws IOException {
     try (OpenReader open = OpenReader.pageIndex(tmp).withFilter("zip_code", BinaryOperator.EQUAL, 12345)) {
       open.withPageIndex();
-      SecondaryFilterRanges sfr = open.reader.secondaryFiltersByteRanges(open.reader.allRowGroups());
-      assertEquals(0, sfr.dictionaryPageRanges().length,
+      assertEquals(0, open.reader.dictionaryPagesByteRanges(open.reader.allRowGroups()).length,
           "High-cardinality zip_code: ADAPTIVE policy skips dictionary emission "
               + "even with page index present and an EQUAL predicate requesting it");
     }
   }
 
   /**
-   * Verifies secondaryFiltersByteRanges() finds dictionary pages even without page
+   * Verifies dictionaryPagesByteRanges() finds dictionary pages even without page
    * index. Dictionary pruning relies on encoding statistics and dictionary-page metadata
    * rather than page indexes, so a low-cardinality column with an EQUAL predicate remains
    * eligible.
    */
   @Test
-  void testSecondaryFiltersByteRangesForRowGroupStats(@TempDir Path tmp) throws IOException {
+  void testDictionaryPagesByteRangesForRowGroupStats(@TempDir Path tmp) throws IOException {
     try (OpenReader open = OpenReader.rowGroupStats(tmp).withFilter("num_units", BinaryOperator.EQUAL, 2)) {
-      SecondaryFilterRanges sfr = open.reader.secondaryFiltersByteRanges(new int[]{0});
-      assertEquals(1, sfr.dictionaryPageRanges().length,
+      ByteRange[] dict = open.reader.dictionaryPagesByteRanges(new int[]{0});
+      assertEquals(1, dict.length,
           "A row group has only one dictionary-page per (filter) column");
-      assertTrue(sfr.dictionaryPageRanges()[0].size() > 0,
-          "Dictionary page range must be non-empty");
+      assertTrue(dict[0].size() > 0, "Dictionary page range must be non-empty");
     }
   }
 
@@ -325,7 +322,7 @@ public class HybridScanReaderTest extends CudfTestBase {
    * literal is not present in any group's dictionary. With the pageIndex fixture, num_units
    * dictionaries are {1,2} (g0), {2,3} (g1), {3,4} (g2); filtering on num_units == 5 must
    * yield an empty surviving-group array.
-   * <p>setupPageIndex() must be called before secondaryFiltersByteRanges() so that
+   * <p>setupPageIndex() must be called before dictionaryPagesByteRanges() so that
    * has_page_index_and_only_dict_encoded_pages is true and dictionary page ranges are emitted.</p>
    */
   @Test
@@ -334,8 +331,8 @@ public class HybridScanReaderTest extends CudfTestBase {
       open.withPageIndex();
       HybridScanReader reader = open.reader;
       int[] rgs = reader.allRowGroups();
-      SecondaryFilterRanges sfr = reader.secondaryFiltersByteRanges(rgs);
-      DeviceMemoryBuffer[] dictBufs = copyRangesToDevice(open.file, sfr.dictionaryPageRanges());
+      DeviceMemoryBuffer[] dictBufs =
+          copyRangesToDevice(open.file, reader.dictionaryPagesByteRanges(rgs));
       try {
         int[] result = reader.filterRowGroupsWithDictionaryPages(dictBufs, rgs);
         assertEquals(0, result.length,
@@ -359,8 +356,8 @@ public class HybridScanReaderTest extends CudfTestBase {
       open.withPageIndex();
       HybridScanReader reader = open.reader;
       int[] rgs = reader.allRowGroups();
-      SecondaryFilterRanges sfr = reader.secondaryFiltersByteRanges(rgs);
-      DeviceMemoryBuffer[] dictBufs = copyRangesToDevice(open.file, sfr.dictionaryPageRanges());
+      DeviceMemoryBuffer[] dictBufs =
+          copyRangesToDevice(open.file, reader.dictionaryPagesByteRanges(rgs));
       try {
         int[] result = reader.filterRowGroupsWithDictionaryPages(dictBufs, rgs);
         assertArrayEquals(new int[]{0, 1}, result,
@@ -373,7 +370,7 @@ public class HybridScanReaderTest extends CudfTestBase {
 
   /**
    * Verifies filterRowGroupsWithDictionaryPages() throws when the upstream
-   * secondaryFiltersByteRanges yields no dict ranges due to ADAPTIVE policy skipping dict
+   * dictionaryPagesByteRanges yields no dict ranges due to ADAPTIVE policy skipping dict
    * emission on a high-cardinality column. With EQUAL on zip_code (5,000 distinct values
    * per group), no dict pages exist, so no buffers can be supplied. The C++ CUDF_EXPECTS
    * at prepare_dictionaries enforces buffers.size() == row_groups × dict-eligible cols.
@@ -383,8 +380,8 @@ public class HybridScanReaderTest extends CudfTestBase {
     try (OpenReader open = OpenReader.pageIndex(tmp).withFilter("zip_code", BinaryOperator.EQUAL, 12345)) {
       open.withPageIndex();
       int[] rgs = open.reader.allRowGroups();
-      SecondaryFilterRanges sfr = open.reader.secondaryFiltersByteRanges(rgs);
-      DeviceMemoryBuffer[] dictBufs = copyRangesToDevice(open.file, sfr.dictionaryPageRanges());
+      DeviceMemoryBuffer[] dictBufs =
+          copyRangesToDevice(open.file, open.reader.dictionaryPagesByteRanges(rgs));
       try {
         assertEquals(0, dictBufs.length, "ADAPTIVE skips dict for high-cardinality zip_code");
         assertThrows(CudfException.class,
@@ -406,8 +403,8 @@ public class HybridScanReaderTest extends CudfTestBase {
       throws IOException {
     try (OpenReader open = OpenReader.rowGroupStats(tmp).withFilter("num_units", BinaryOperator.EQUAL, 2)) {
       int[] rgs = new int[]{0};
-      SecondaryFilterRanges sfr = open.reader.secondaryFiltersByteRanges(rgs);
-      DeviceMemoryBuffer[] dictBufs = copyRangesToDevice(open.file, sfr.dictionaryPageRanges());
+      DeviceMemoryBuffer[] dictBufs =
+          copyRangesToDevice(open.file, open.reader.dictionaryPagesByteRanges(rgs));
       try {
         assertEquals(1, dictBufs.length,
             "The dictionary page is discoverable even without a page index");
@@ -1119,7 +1116,8 @@ public class HybridScanReaderTest extends CudfTestBase {
         invocation("setupPageIndex", r -> r.setupPageIndex(null)),
         invocation("totalRowsInRowGroups", r -> r.totalRowsInRowGroups(null)),
         invocation("filterRowGroupsWithStats", r -> r.filterRowGroupsWithStats(null)),
-        invocation("secondaryFiltersByteRanges", r -> r.secondaryFiltersByteRanges(null)),
+        invocation("bloomFiltersByteRanges", r -> r.bloomFiltersByteRanges(null)),
+        invocation("dictionaryPagesByteRanges", r -> r.dictionaryPagesByteRanges(null)),
         invocation("filterRowGroupsWithDictionaryPagesNullBuffers",
             r -> r.filterRowGroupsWithDictionaryPages(null, new int[]{0})),
         invocation("filterRowGroupsWithDictionaryPagesNullRowGroups",
@@ -1262,7 +1260,8 @@ public class HybridScanReaderTest extends CudfTestBase {
         invocation("allRowGroups", HybridScanReader::allRowGroups),
         invocation("totalRowsInRowGroups", r -> r.totalRowsInRowGroups(new int[]{0})),
         invocation("filterRowGroupsWithStats", r -> r.filterRowGroupsWithStats(new int[]{0})),
-        invocation("secondaryFiltersByteRanges", r -> r.secondaryFiltersByteRanges(new int[]{0})),
+        invocation("bloomFiltersByteRanges", r -> r.bloomFiltersByteRanges(new int[]{0})),
+        invocation("dictionaryPagesByteRanges", r -> r.dictionaryPagesByteRanges(new int[]{0})),
         invocation("filterRowGroupsWithDictionaryPages", r ->
             r.filterRowGroupsWithDictionaryPages(new DeviceMemoryBuffer[0], new int[]{0})),
         invocation("filterColumnChunksByteRanges", r -> r.filterColumnChunksByteRanges(new int[]{0})),
@@ -1466,12 +1465,12 @@ public class HybridScanReaderTest extends CudfTestBase {
   }
 
   /**
-   * Writes a Parquet file with no page index; only {@code COLUMN} statistics emit one. Both
-   * {@code id} and {@code zip_code} hold the globally sequential row index, and
-   * {@code num_units} cycles over {1, 2, 3}, low-cardinality enough that the ADAPTIVE
-   * dictionary policy emits a dictionary (see
-   * {@link #testSecondaryFiltersByteRangesEmptyForRowGroupStats}). The writer caps a page at
-   * 20,000 rows, so exceed that per group for chunks spanning several pages.
+   * Writes a small Parquet file with {@code ROWGROUP}-level statistics: row-group min/max
+   * are recorded but no page index (no {@code ColumnIndex}/{@code OffsetIndex}) is emitted.
+   * Includes a low-cardinality {@code num_units} column ({1, 2, 3} cycle) so the writer's
+   * ADAPTIVE dictionary policy emits a dictionary; this lets tests exercise the
+   * "no page index, dict exists" path (see
+   * {@link #testDictionaryPagesByteRangesForRowGroupStats}).
    */
   private static void writeNoPageIndexParquet(File path, int rowsPerGroup, int numGroups,
                                               ParquetWriterOptions.StatisticsFrequency stats) {
