@@ -758,7 +758,7 @@ table_with_metadata hybrid_scan_reader_impl::materialize_filter_columns(
 
   auto data_page_mask = thrust::host_vector<bool>{};
   if (mask_data_pages == use_data_page_mask::YES) {
-    _row_mask      = set_nulls_to_true(row_mask, stream);
+    _row_mask      = row_mask;
     data_page_mask = _extended_metadata->compute_data_page_mask(
       _row_mask, row_group_indices, _input_columns, stream);
   }
@@ -837,7 +837,7 @@ void hybrid_scan_reader_impl::setup_chunking_for_filter_columns(
   std::size_t chunk_read_limit,
   std::size_t pass_read_limit,
   std::span<std::vector<size_type> const> row_group_indices,
-  cudf::mutable_column_view const& row_mask,
+  cudf::column_view const& row_mask,
   use_data_page_mask mask_data_pages,
   std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
   parquet_reader_options const& options,
@@ -869,7 +869,7 @@ void hybrid_scan_reader_impl::setup_chunking_for_filter_columns(
 
   auto data_page_mask = thrust::host_vector<bool>{};
   if (mask_data_pages == use_data_page_mask::YES) {
-    _row_mask      = set_nulls_to_true(row_mask, stream);
+    _row_mask      = row_mask;
     data_page_mask = _extended_metadata->compute_data_page_mask(
       _row_mask, row_group_indices, _input_columns, stream);
   }
@@ -1238,6 +1238,9 @@ void hybrid_scan_reader_impl::prepare_data(
   if (_file_itm_data._current_input_pass < _file_itm_data.num_passes()) {
     handle_chunking(mode, column_chunk_data, data_page_mask);
   }
+
+  // Clear the cached row mask column view
+  _row_mask = cudf::column_view{};
 }
 
 template <typename RowMaskView>

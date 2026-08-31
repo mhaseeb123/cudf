@@ -338,7 +338,7 @@ class aggregate_reader_metadata : public aggregate_reader_metadata_base {
    * Compute a vector of boolean vectors indicating which data pages need to be decoded to
    * construct each input column based on the row mask, one vector per column
    *
-   * @param row_mask Non-nullable boolean column view indicating surviving rows
+   * @param row_mask Boolean column view indicating surviving rows
    * @param row_group_indices Input row groups indices
    * @param input_columns Input column information
    * @param stream CUDA stream used for device memory operations and kernel launches

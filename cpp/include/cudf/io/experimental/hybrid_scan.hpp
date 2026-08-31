@@ -656,7 +656,7 @@ class hybrid_scan_reader {
     std::size_t chunk_read_limit,
     std::size_t pass_read_limit,
     std::span<size_type const> row_group_indices,
-    cudf::mutable_column_view const& row_mask,
+    cudf::column_view const& row_mask,
     use_data_page_mask mask_data_pages,
     std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
     parquet_reader_options const& options,

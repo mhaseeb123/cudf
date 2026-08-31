@@ -161,7 +161,7 @@ cdef extern from "cudf/io/experimental/hybrid_scan.hpp" \
             size_t chunk_read_limit,
             size_t pass_read_limit,
             std_span[const_size_type] row_group_indices,
-            const mutable_column_view& row_mask,
+            const column_view& row_mask,
             use_data_page_mask mask_data_pages,
             std_span[const_device_span_const_uint8_t] column_chunk_data,
             const parquet_reader_options& options,

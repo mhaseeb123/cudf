@@ -253,7 +253,7 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
     std::size_t chunk_read_limit,
     std::size_t pass_read_limit,
     std::span<std::vector<size_type> const> row_group_indices,
-    cudf::mutable_column_view const& row_mask,
+    cudf::column_view const& row_mask,
     use_data_page_mask mask_data_pages,
     std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
     parquet_reader_options const& options,
@@ -631,6 +631,9 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
 
   std::optional<std::vector<std::string>> _filter_columns_names;
 
+  // Non-owning view of the caller's row mask, only valid for the duration of a single
+  // materialization or chunking setup call, during which the pass page mask is computed. Null
+  // entries mean the row could not be pruned and is therefore treated as a surviving row.
   cudf::column_view _row_mask{};
 
   std::vector<cudf::io::detail::inline_column_buffer> _original_output_buffers_template;

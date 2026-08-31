@@ -5,14 +5,13 @@
 
 #include "page_index_filter_utils.hpp"
 
-#include <cudf/column/column_device_view.cuh>
 #include <cudf/detail/algorithms/reduce.cuh>
-#include <cudf/detail/iterator.cuh>
 #include <cudf/detail/labeling/label_segments.cuh>
 #include <cudf/detail/utilities/host_vector.hpp>
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/types.hpp>
+#include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/error.hpp>
 
 #include <rmm/device_uvector.hpp>
@@ -20,7 +19,6 @@
 
 #include <cuda/iterator>
 #include <cuda/stream>
-#include <thrust/copy.h>
 #include <thrust/for_each.h>
 #include <thrust/transform.h>
 
@@ -32,19 +30,64 @@ namespace cudf::io::parquet::experimental::detail {
 
 namespace {
 
+/**
+ * @brief Functor to read the row mask, i.e. the zeroth Fenwick tree level
+ *
+ * Nulls are read as retained rows here so that pages aren't accidentally pruned due to
+ * unavailable page-level statistics (represented as nulls)
+ */
+struct row_mask_accessor {
+  bool const* data;               ///< Row mask data, adjusted for the column view offset
+  bitmask_type const* null_mask;  ///< Null mask, or nullptr if there are no nulls
+  cudf::size_type offset;         ///< Column view offset, needed to index into the null mask
+
+  /**
+   * @brief Constructs a row mask accessor from a nullable boolean row mask column
+   *
+   * @param row_mask Boolean row mask column
+   */
+  explicit row_mask_accessor(cudf::column_view const& row_mask)
+    : data{row_mask.begin<bool>()},
+      // Skip the validity check altogether if there are no nulls to resolve
+      null_mask{row_mask.null_count() ? row_mask.null_mask() : nullptr},
+      offset{row_mask.offset()}
+  {
+  }
+
+  __device__ bool inline operator()(cudf::size_type row_idx) const noexcept
+  {
+    auto const is_null = null_mask != nullptr and not bit_is_set(null_mask, offset + row_idx);
+    return is_null or data[row_idx];
+  }
+};
+
 /*
  * @brief Functor to build a Fenwick tree level from the previous level data
  *
  * @param tree_level_ptrs Pointers to the start of Fenwick tree level data
+ * @param row_mask Accessor for the zeroth tree level (the row mask)
  * @param prev_level Previous tree level
  * @param prev_level_size Size of the previous tree level
  * @param current_level_size Size of the current tree level
  */
 struct build_fenwick_tree_level_functor {
   bool** tree_level_ptrs;
+  row_mask_accessor row_mask;
   cudf::size_type prev_level;
   cudf::size_type prev_level_size;
   cudf::size_type current_level_size;
+
+  /**
+   * @brief Reads an element from the previous tree level
+   *
+   * @param prev_level_idx Previous tree level element index
+   * @return Value of the element at the previous tree level
+   */
+  __device__ bool inline read_prev_level(cudf::size_type prev_level_idx) const noexcept
+  {
+    // `prev_level` is uniform across all threads so this branch is free
+    return prev_level == 0 ? row_mask(prev_level_idx) : tree_level_ptrs[prev_level][prev_level_idx];
+  }
 
   /**
    * @brief Builds the next Fenwick tree level from the current level data
@@ -56,15 +99,14 @@ struct build_fenwick_tree_level_functor {
    */
   __device__ void operator()(cudf::size_type current_level_idx) const noexcept
   {
-    auto const prev_level_ptr = tree_level_ptrs[prev_level];
-    auto current_level_ptr    = tree_level_ptrs[prev_level + 1];
+    auto current_level_ptr = tree_level_ptrs[prev_level + 1];
 
     // Handle the odd-sized remaining element if prev_level_size is odd
     if (prev_level_size % 2 and current_level_idx == current_level_size - 1) {
-      current_level_ptr[current_level_idx] = prev_level_ptr[prev_level_size - 1];
+      current_level_ptr[current_level_idx] = read_prev_level(prev_level_size - 1);
     } else {
       current_level_ptr[current_level_idx] =
-        prev_level_ptr[(current_level_idx * 2)] or prev_level_ptr[(current_level_idx * 2) + 1];
+        read_prev_level(current_level_idx * 2) or read_prev_level((current_level_idx * 2) + 1);
     }
   }
 };
@@ -73,12 +115,14 @@ struct build_fenwick_tree_level_functor {
  * @brief Functor to binary search a `true` value in the Fenwick tree in range [start, end)
  *
  * @param tree_level_ptrs Pointers to the start of Fenwick tree level data
+ * @param row_mask Accessor for the zeroth tree level (the row mask)
  * @param page_offsets Pointer to page offsets describing each search range i as [page_offsets[i],
  * page_offsets[i+1))
  * @param num_ranges Number of search ranges
  */
 struct search_fenwick_tree_functor {
   bool** tree_level_ptrs;
+  row_mask_accessor row_mask;
   cudf::size_type const* page_offsets;
   cudf::size_type num_ranges;
 
@@ -185,13 +229,9 @@ struct search_fenwick_tree_functor {
                                                       cudf::size_type tree_level,
                                                       cudf::size_type block_size) const noexcept
   {
-    if constexpr (Boundary == boundary::START) {
-      auto const mask_index = boundary_pos >> tree_level;
-      return tree_level_ptrs[tree_level][mask_index];
-    } else {
-      auto const mask_index = (boundary_pos - block_size) >> tree_level;
-      return tree_level_ptrs[tree_level][mask_index];
-    }
+    auto const position = (Boundary == boundary::START) ? boundary_pos : boundary_pos - block_size;
+    auto const mask_index = position >> tree_level;
+    return tree_level == 0 ? row_mask(mask_index) : tree_level_ptrs[tree_level][mask_index];
   }
 
   /**
@@ -426,26 +466,12 @@ rmm::device_uvector<size_type> compute_page_indices_async(
   return page_indices;
 }
 
-cudf::column_view set_nulls_to_true(cudf::mutable_column_view const& row_mask,
-                                    cuda::stream_ref stream)
-{
-  if (row_mask.has_nulls()) {
-    auto const d_row_mask = cudf::column_device_view::create(row_mask, stream);
-    auto const iter = cudf::detail::make_null_replacement_iterator<bool>(*d_row_mask, true, true);
-    thrust::copy(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-                 iter,
-                 iter + row_mask.size(),
-                 row_mask.begin<bool>());
-  }
-
-  return cudf::column_view{
-    row_mask.type(), row_mask.size(), row_mask.head(), nullptr, 0, row_mask.offset()};
-}
-
 bool are_all_rows_retained(cudf::column_view const& row_mask, cuda::stream_ref stream)
 {
-  return cudf::detail::all_of(
-    row_mask.begin<bool>(), row_mask.end<bool>(), cuda::std::identity{}, stream);
+  return cudf::detail::all_of(cuda::counting_iterator<cudf::size_type>{0},
+                              cuda::counting_iterator{row_mask.size()},
+                              row_mask_accessor{row_mask},
+                              stream);
 }
 
 thrust::host_vector<bool> compute_row_range_selection_mask(
@@ -463,7 +489,9 @@ thrust::host_vector<bool> compute_row_range_selection_mask(
   auto const num_levels         = static_cast<cudf::size_type>(tree_level_offsets.size());
   auto tree_levels_data         = rmm::device_uvector<bool>(tree_level_offsets.back(), stream, mr);
   auto host_tree_level_ptrs     = cudf::detail::make_pinned_vector_async<bool*>(num_levels, stream);
-  host_tree_level_ptrs[0]       = const_cast<bool*>(row_mask.begin<bool>());
+  // The zeroth level is the row mask itself, read through its accessor
+  auto const d_row_mask   = row_mask_accessor{row_mask};
+  host_tree_level_ptrs[0] = nullptr;
   std::for_each(cuda::counting_iterator<cudf::size_type>{1},
                 cuda::counting_iterator<cudf::size_type>{num_levels},
                 [&](auto const level_idx) {
@@ -481,8 +509,11 @@ thrust::host_vector<bool> compute_row_range_selection_mask(
       thrust::for_each(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
                        cuda::counting_iterator<cudf::size_type>{0},
                        cuda::counting_iterator{current_level_size},
-                       build_fenwick_tree_level_functor{
-                         tree_level_ptrs.data(), prev_level, prev_level_size, current_level_size});
+                       build_fenwick_tree_level_functor{.tree_level_ptrs = tree_level_ptrs.data(),
+                                                        .row_mask        = d_row_mask,
+                                                        .prev_level      = prev_level,
+                                                        .prev_level_size = prev_level_size,
+                                                        .current_level_size = current_level_size});
       prev_level_size = current_level_size;
     });
 
@@ -490,12 +521,14 @@ thrust::host_vector<bool> compute_row_range_selection_mask(
   auto device_results      = rmm::device_uvector<bool>(num_ranges, stream, mr);
   auto pinned_page_offsets = cudf::detail::make_pinned_vector(page_row_offsets, stream);
   auto page_offsets = cudf::detail::make_device_uvector_async(pinned_page_offsets, stream, mr);
-  thrust::transform(
-    rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
-    cuda::counting_iterator<cudf::size_type>{0},
-    cuda::counting_iterator{num_ranges},
-    device_results.begin(),
-    search_fenwick_tree_functor{tree_level_ptrs.data(), page_offsets.data(), num_ranges});
+  thrust::transform(rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
+                    cuda::counting_iterator<cudf::size_type>{0},
+                    cuda::counting_iterator{num_ranges},
+                    device_results.begin(),
+                    search_fenwick_tree_functor{.tree_level_ptrs = tree_level_ptrs.data(),
+                                                .row_mask        = d_row_mask,
+                                                .page_offsets    = page_offsets.data(),
+                                                .num_ranges      = num_ranges});
 
   auto results = cudf::detail::make_pinned_vector_async(device_results, stream);
   stream.sync();

@@ -71,18 +71,9 @@ compute_page_row_offsets_and_colchunk_page_offsets(
   rmm::device_async_resource_ref mr);
 
 /**
- * @brief Sets nulls in the row mask to true and returns a non-nullable row mask view
- *
- * @param row_mask Mutable row mask column view
- * @param stream CUDA stream used for device memory
- * operations and kernel launches
- * @return Non-nullable column view of the resolved row mask
- */
-[[nodiscard]] cudf::column_view set_nulls_to_true(cudf::mutable_column_view const& row_mask,
-                                                  cuda::stream_ref stream);
-
-/**
  * @brief Checks whether every row is reatained by the boolean row mask
+ *
+ * Null entries in the row mask are treated as surviving rows
  *
  * @param retention_mask Boolean column indicating retained rows
  * @param stream CUDA stream used for device memory operations and kernel launches
@@ -93,6 +84,8 @@ compute_page_row_offsets_and_colchunk_page_offsets(
 
 /**
  * @brief Computes a mask indicating which row ranges contain at least one selected row
+ *
+ * Null entries in the row mask are treated as surviving rows
  *
  * @param row_mask Boolean column indicating selected rows
  * @param page_row_offsets Page row offsets defining the row ranges
