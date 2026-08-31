@@ -310,6 +310,25 @@ def test_read_parquet_filesystem(s3_bucket_public, s3so, pdf):
     assert_eq(pdf, got)
 
 
+def test_read_parquet_metadata(s3_bucket_public, fs_kwargs, pdf):
+    fname = "test_parquet_metadata.parquet"
+    buffer = BytesIO()
+    pdf.to_parquet(path=buffer)
+    buffer.seek(0)
+    s3_bucket_public.put_object(Key=fname, Body=buffer)
+
+    num_rows, num_row_groups, col_names, num_columns, _ = (
+        cudf.io.read_parquet_metadata(
+            f"s3://{s3_bucket_public.name}/{fname}", **fs_kwargs
+        )
+    )
+
+    assert num_rows == len(pdf)
+    assert num_row_groups == 1
+    assert num_columns == len(pdf.columns)
+    assert col_names == list(pdf.columns)
+
+
 def test_read_parquet_multi_file(s3_bucket_public, s3so, pdf):
     fname_1 = "test_parquet_reader_multi_file_1.parquet"
     buffer_1 = BytesIO()

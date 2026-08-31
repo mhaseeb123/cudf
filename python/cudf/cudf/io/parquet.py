@@ -727,12 +727,16 @@ def _parse_metadata(meta) -> tuple[bool, Any, None | np.dtype]:
 @_performance_tracking
 def read_parquet_metadata(
     filepath_or_buffer,
+    storage_options=None,
+    filesystem=None,
 ) -> tuple[int, int, Sequence[Hashable], int, Sequence[dict[str, int]]]:
     """{docstring}"""
 
     # List of filepaths or buffers
     filepaths_or_buffers = ioutils.get_reader_filepath_or_buffer(
         path_or_data=filepath_or_buffer,
+        storage_options=storage_options,
+        filesystem=filesystem,
         bytes_per_thread=None,
     )
 
