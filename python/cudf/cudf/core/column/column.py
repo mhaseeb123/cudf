@@ -1552,6 +1552,32 @@ class ColumnBase(Serializable, BinaryOperand, Reducible):
                 n += data.size
         if col.null_mask() is not None:
             n += plc.null_mask.bitmask_allocation_size_bytes(col.size())
+
+        if col.size() == 0:
+            return n
+
+        if col.type().id() == plc.TypeId.LIST:
+            # A sliced list retains the complete offsets and values children.
+            # Count only its logical offsets and recurse through its logically
+            # sliced values view.
+            if col.num_children() == 0:
+                return n
+            offsets = col.list_view().offsets()
+            offsets_typestr: str = offsets.type().typestr  # type: ignore[assignment]
+            n += (col.size() + 1) * np.dtype(offsets_typestr).itemsize
+            n += ColumnBase._plc_memory_usage(
+                col.list_view().get_sliced_child()
+            )
+            return n
+
+        if col.type().id() == plc.TypeId.STRUCT:
+            struct_view = col.struct_view()
+            for child_index in range(col.num_children()):
+                n += ColumnBase._plc_memory_usage(
+                    struct_view.get_sliced_child(child_index)
+                )
+            return n
+
         for child in col.children():
             n += ColumnBase._plc_memory_usage(child)
         return n
