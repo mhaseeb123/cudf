@@ -1538,7 +1538,7 @@ class ColumnBase(Serializable, BinaryOperand, Reducible):
             return ColumnBase.create(plc_column, np.dtype(np.bool_))
 
     @staticmethod
-    def _plc_memory_usage(col: plc.Column) -> int:
+    def _plc_memory_usage_buffers(col: plc.Column) -> int:
         n = 0
         if (data := col.data()) is not None:
             try:
@@ -1552,45 +1552,20 @@ class ColumnBase(Serializable, BinaryOperand, Reducible):
                 n += data.size
         if col.null_mask() is not None:
             n += plc.null_mask.bitmask_allocation_size_bytes(col.size())
+        return n
 
-        if col.size() == 0:
-            return n
-
-        if col.type().id() == plc.TypeId.LIST:
-            # A sliced list retains the complete offsets and values children.
-            # Count only its logical offsets and recurse through its logically
-            # sliced values view.
-            if col.num_children() == 0:
-                return n
-            offsets = col.list_view().offsets()
-            offsets_typestr: str = offsets.type().typestr  # type: ignore[assignment]
-            n += (col.size() + 1) * np.dtype(offsets_typestr).itemsize
-            n += ColumnBase._plc_memory_usage(
-                col.list_view().get_sliced_child()
-            )
-            return n
-
-        if col.type().id() == plc.TypeId.STRUCT:
-            struct_view = col.struct_view()
-            for child_index in range(col.num_children()):
-                n += ColumnBase._plc_memory_usage(
-                    struct_view.get_sliced_child(child_index)
-                )
-            return n
-
+    def _plc_memory_usage(self, col: plc.Column) -> int:
+        n = self._plc_memory_usage_buffers(col)
         for child in col.children():
-            n += ColumnBase._plc_memory_usage(child)
+            n += ColumnBase._plc_memory_usage(self, child)
         return n
 
     @cached_property
     def memory_usage(self) -> int:
-        # Sliced nested columns require reading their offsets from device memory, so their
+        # Sliced nested columns require reading their offsets from device memory, so the
         # buffers must be spill locked.
-        if self.plc_column.type().id() in (plc.TypeId.LIST, plc.TypeId.STRUCT):
-            with self.access(mode="read", scope="internal") as col:
-                return self._plc_memory_usage(col.plc_column)
-        else:
-            return self._plc_memory_usage(self.plc_column)
+        with self.access(mode="read", scope="internal") as col:
+            return self._plc_memory_usage(col.plc_column)
 
     def _fill(
         self,

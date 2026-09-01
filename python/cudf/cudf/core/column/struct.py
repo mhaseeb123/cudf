@@ -42,6 +42,20 @@ class StructColumn(ColumnBase):
     the number of fields in the Struct Dtype.
     """
 
+    def _plc_memory_usage(self, col: plc.Column) -> int:
+        n = self._plc_memory_usage_buffers(col)
+        if col.size() == 0:
+            return n
+
+        struct_view = col.struct_view()
+        for child_index, child_dtype in enumerate(self.fields.values()):
+            sliced_child = struct_view.get_sliced_child(child_index)
+            child = ColumnBase.create(
+                sliced_child, child_dtype, validate=False
+            )
+            n += child._plc_memory_usage(sliced_child)
+        return n
+
     @functools.cached_property
     def fields(self) -> dict[str, DtypeObj]:
         return fields_from_struct_dtype(self.dtype)
