@@ -84,7 +84,7 @@ struct build_fenwick_tree_level_functor {
    */
   __device__ bool inline read_prev_level(cudf::size_type prev_level_idx) const noexcept
   {
-    // `prev_level` is uniform across all threads so this branch is free
+    // Use the row mask accessor for the zeroth tree level
     return prev_level == 0 ? row_mask(prev_level_idx) : tree_level_ptrs[prev_level][prev_level_idx];
   }
 
