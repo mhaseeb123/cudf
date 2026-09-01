@@ -1584,10 +1584,13 @@ class ColumnBase(Serializable, BinaryOperand, Reducible):
 
     @cached_property
     def memory_usage(self) -> int:
-        # Sliced nested columns require reading offsets from device memory,
-        # so the buffers must be spill locked for the duration.
-        with self.access(mode="read", scope="internal") as col:
-            return self._plc_memory_usage(col.plc_column)
+        # Sliced nested columns require reading their offsets from device memory, so their
+        # buffers must be spill locked.
+        if self.plc_column.type().id() in (plc.TypeId.LIST, plc.TypeId.STRUCT):
+            with self.access(mode="read", scope="internal") as col:
+                return self._plc_memory_usage(col.plc_column)
+        else:
+            return self._plc_memory_usage(self.plc_column)
 
     def _fill(
         self,
