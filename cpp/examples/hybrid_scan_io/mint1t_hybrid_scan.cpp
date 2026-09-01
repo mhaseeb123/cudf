@@ -638,15 +638,13 @@ int main(int argc, char const** argv)
     auto payload_data = multisource_device_data{};
     if (args.use_page_mask and args.use_sparse_page_io) {
       start = clock_type::now();
-      auto const payload_ranges = reader.payload_column_chunks_byte_ranges(
-        pass, pass_mask, use_data_page_mask::YES, options, stream);
-      for (auto const& source_ranges : payload_ranges) {
-        requested_bytes =
-          std::accumulate(source_ranges.begin(),
-                          source_ranges.end(),
-                          requested_bytes,
-                          [](uint64_t sum, auto const& range) { return sum + range.size(); });
-      }
+      auto const payload_ranges =
+        reader.payload_pages_byte_ranges(pass, pass_mask, options, stream);
+      requested_bytes +=
+        std::accumulate(payload_ranges.first.begin(),
+                        payload_ranges.first.end(),
+                        uint64_t{0},
+                        [](uint64_t sum, auto const& range) { return sum + range.size(); });
       range_planning_seconds += std::chrono::duration<double>(clock_type::now() - start).count();
 
       start        = clock_type::now();
@@ -654,15 +652,8 @@ int main(int argc, char const** argv)
       range_fetch_seconds += std::chrono::duration<double>(clock_type::now() - start).count();
 
       start = clock_type::now();
-      reader.setup_chunking_for_payload_columns(0,
-                                                0,
-                                                pass,
-                                                pass_mask,
-                                                use_data_page_mask::YES,
-                                                payload_data.per_source_spans,
-                                                options,
-                                                stream,
-                                                stats_mr);
+      reader.setup_chunking_for_payload_columns(
+        0, 0, pass, pass_mask, payload_data.flat_spans, options, stream, stats_mr);
     } else {
       start               = clock_type::now();
       auto payload_ranges = reader.payload_column_chunks_byte_ranges(pass, options);
