@@ -1872,6 +1872,11 @@ def get_reader_filepath_or_buffer(
 ):
     """{docstring}"""
 
+    # Validate up front so that a bad `filesystem` is rejected for every input
+    # type, not just string paths.
+    if filesystem is not None:
+        _validate_filesystem(filesystem, storage_options)
+
     # Convert path_or_data to a list of input data sources
     input_sources = [
         stringify_pathlike(source)
@@ -1984,6 +1989,9 @@ def get_writer_filepath_or_buffer(
     filepath_or_buffer : str,
         Filepath string or buffer of data
     """
+    if filesystem is not None:
+        _validate_filesystem(filesystem, storage_options)
+
     if storage_options is None:
         storage_options = {}
 
@@ -1996,7 +2004,6 @@ def get_writer_filepath_or_buffer(
                 path_or_data, mode=mode or "w", storage_options=storage_options
             )[0]
         else:
-            _validate_filesystem(filesystem, storage_options)
             fs = filesystem
 
         if not _is_local_filesystem(fs):

@@ -164,8 +164,8 @@ def read_orc(
     use_index: bool = True,
     timestamp_type=None,
     storage_options=None,
-    filesystem=None,
     bytes_per_thread=None,
+    filesystem=None,
 ):
     """{docstring}"""
     if skiprows is not None:
@@ -374,8 +374,8 @@ def to_orc(
     row_index_stride: int | None = None,
     cols_as_map_type=None,
     storage_options=None,
-    filesystem=None,
     index: bool | None = None,
+    filesystem=None,
 ):
     """{docstring}"""
 

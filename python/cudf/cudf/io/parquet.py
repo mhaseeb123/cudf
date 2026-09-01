@@ -264,7 +264,6 @@ def _write_parquet(
     max_dictionary_size: int | None = None,
     partitions_info=None,
     storage_options=None,
-    filesystem=None,
     force_nullable_schema: bool = False,
     header_version: Literal["1.0", "2.0"] = "1.0",
     use_dictionary: bool = True,
@@ -286,6 +285,7 @@ def _write_parquet(
     output_as_binary: set[Hashable] | None = None,
     write_arrow_schema: bool = True,
     page_level_compression: bool = False,
+    filesystem=None,
 ) -> np.ndarray | None:
     if is_list_like(paths) and len(paths) > 1:
         if partitions_info is None:
@@ -369,7 +369,6 @@ def write_to_dataset(
     max_page_size_bytes: int | None = None,
     max_page_size_rows: int | None = None,
     storage_options=None,
-    filesystem=None,
     force_nullable_schema: bool = False,
     header_version: Literal["1.0", "2.0"] = "1.0",
     use_dictionary: bool = True,
@@ -391,6 +390,7 @@ def write_to_dataset(
     output_as_binary: set[Hashable] | None = None,
     store_schema=False,
     page_level_compression: bool = False,
+    filesystem=None,
 ):
     """Wraps `to_parquet` to write partitioned Parquet datasets.
     For each combination of partition group and value,
@@ -1544,7 +1544,6 @@ def to_parquet(
     max_page_size_rows: int | None = None,
     max_dictionary_size: int | None = None,
     storage_options=None,
-    filesystem=None,
     return_metadata: bool = False,
     force_nullable_schema: bool = False,
     header_version: Literal["1.0", "2.0"] = "1.0",
@@ -1568,6 +1567,7 @@ def to_parquet(
     store_schema=False,
     page_level_compression: bool = False,
     *args,
+    filesystem=None,
     **kwargs,
 ):
     """{docstring}"""
@@ -2124,8 +2124,20 @@ class ParquetDatasetWriter:
         storage_options=None,
         filesystem=None,
     ) -> None:
-        if isinstance(path, str) and path.startswith("s3://"):
-            self.fs_meta = {"is_s3": True, "actual_path": path}
+        if filesystem is not None:
+            ioutils._validate_filesystem(filesystem, storage_options)
+        self.filesystem = filesystem
+
+        # libcudf's chunked-writer sinks only understand local paths, so
+        # remote output is staged in a temporary directory and uploaded on
+        # `close()`.
+        is_remote = (
+            filesystem is not None
+            and not ioutils._is_local_filesystem(filesystem)
+        ) or (isinstance(path, str) and path.startswith("s3://"))
+
+        if is_remote:
+            self.fs_meta = {"is_remote": True, "actual_path": path}
             self.dir_: tempfile.TemporaryDirectory | None = (
                 tempfile.TemporaryDirectory()
             )
@@ -2148,9 +2160,6 @@ class ParquetDatasetWriter:
         # in self._chunked_writers for reverse lookup
         self.path_cw_map: dict[str, int] = {}
         self.storage_options = storage_options
-        if filesystem is not None:
-            ioutils._validate_filesystem(filesystem, storage_options)
-        self.filesystem = filesystem
         self.filename = file_name_prefix
         self.max_file_size = max_file_size
         if max_file_size is not None:
@@ -2173,9 +2182,9 @@ class ParquetDatasetWriter:
             partition_cols=self.partition_cols,
             preserve_index=self.common_args["index"],
         )
-        if self.fs_meta.get("is_s3", False):
-            # `self.path` is a local temporary directory here; the upload to S3
-            # happens in `close()` using the configured filesystem.
+        if self.fs_meta.get("is_remote", False):
+            # `self.path` is a local staging directory here; the upload to the
+            # remote store happens in `close()`.
             fs = ioutils._ensure_filesystem(None, self.path, None)
         else:
             fs = ioutils._ensure_filesystem(
@@ -2316,15 +2325,13 @@ class ParquetDatasetWriter:
             for cw, _, meta_path in self._chunked_writers
         ]
 
-        if self.fs_meta.get("is_s3", False):
+        if self.fs_meta.get("is_remote", False):
             local_path = self.path
-            s3_path = self.fs_meta["actual_path"]
-            s3_file, _ = ioutils._get_filesystem_and_paths(
-                s3_path,
-                storage_options=self.storage_options,
-                filesystem=self.filesystem,
+            remote_path = self.fs_meta["actual_path"]
+            fs = ioutils._ensure_filesystem(
+                self.filesystem, remote_path, self.storage_options
             )
-            s3_file.put(local_path, s3_path, recursive=True)
+            fs.put(local_path, remote_path, recursive=True)
             shutil.rmtree(self.path)
 
         if self.dir_ is not None:

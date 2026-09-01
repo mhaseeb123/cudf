@@ -7827,7 +7827,6 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
         max_page_size_bytes=None,
         max_page_size_rows=None,
         storage_options=None,
-        filesystem=None,
         return_metadata=False,
         use_dictionary=True,
         header_version="1.0",
@@ -7836,6 +7835,7 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
         column_type_length=None,
         output_as_binary=None,
         *args,
+        filesystem=None,
         **kwargs,
     ):
         """{docstring}"""
@@ -7927,8 +7927,8 @@ class DataFrame(IndexedFrame, GetAttrGetItemMixin):
         row_index_stride=None,
         cols_as_map_type=None,
         storage_options=None,
-        filesystem=None,
         index=None,
+        filesystem=None,
     ):
         """{docstring}"""
         from cudf.io import orc

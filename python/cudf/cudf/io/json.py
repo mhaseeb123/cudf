@@ -119,11 +119,11 @@ def read_json(
     byte_range: None | list[int] = None,
     keep_quotes: bool = False,
     storage_options=None,
-    filesystem=None,
     mixed_types_as_string: bool = False,
     prune_columns: bool = False,
     on_bad_lines: Literal["error", "recover"] = "error",
     *args,
+    filesystem=None,
     **kwargs,
 ) -> DataFrame:
     """{docstring}"""
@@ -371,8 +371,8 @@ def to_json(
     engine: Literal["auto", "pandas", "cudf"] = "auto",
     orient=None,
     storage_options=None,
-    filesystem=None,
     *args,
+    filesystem=None,
     **kwargs,
 ):
     """{docstring}"""

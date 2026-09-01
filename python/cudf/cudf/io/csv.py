@@ -123,8 +123,8 @@ def read_csv(
     comment: str | None = None,
     byte_range: list[int] | tuple[int, int] | None = None,
     storage_options=None,
-    filesystem=None,
     bytes_per_thread: int | None = None,
+    filesystem=None,
 ) -> DataFrame:
     """{docstring}"""
 
