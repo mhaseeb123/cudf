@@ -6,7 +6,6 @@ import sys
 import uuid
 from io import BytesIO, StringIO
 
-import numpy as np
 import pandas as pd
 import pytest
 from fsspec.core import get_fs_token_paths
@@ -309,110 +308,6 @@ def test_read_parquet_filesystem(s3_bucket_public, s3so, pdf):
     path = f"s3://{s3_bucket_public.name}/{'data.*.parquet'}"
     got = cudf.read_parquet(path, filesystem=fs)
     assert_eq(pdf, got)
-
-
-def test_read_parquet_metadata(s3_bucket_public, fs_kwargs, pdf):
-    fname = "test_parquet_metadata.parquet"
-    buffer = BytesIO()
-    pdf.to_parquet(path=buffer)
-    buffer.seek(0)
-    s3_bucket_public.put_object(Key=fname, Body=buffer)
-
-    num_rows, num_row_groups, col_names, num_columns, _ = (
-        cudf.io.read_parquet_metadata(
-            f"s3://{s3_bucket_public.name}/{fname}", **fs_kwargs
-        )
-    )
-
-    assert num_rows == len(pdf)
-    assert num_row_groups == 1
-    assert num_columns == len(pdf.columns)
-    assert col_names == list(pdf.columns)
-
-
-def test_read_parquet_metadata_fetches_footer_only(
-    s3_bucket_public, s3so, monkeypatch
-):
-    # Incompressible data, so the file is far larger than both the footer and
-    # libcudf's 64 KiB speculative-read hint
-    rng = np.random.default_rng(0)
-    big = pd.DataFrame(rng.random((200_000, 4)), columns=list("abcd"))
-    fname = "test_parquet_metadata_footer.parquet"
-    buffer = BytesIO()
-    big.to_parquet(path=buffer, compression=None)
-    size = buffer.tell()
-    buffer.seek(0)
-    s3_bucket_public.put_object(Key=fname, Body=buffer)
-
-    fetched = []
-    original = cudf.utils.ioutils._get_remote_bytes_parquet_footer
-
-    def spy(remote_paths, fs, **kwargs):
-        buffers = original(remote_paths, fs, **kwargs)
-        fetched.extend(len(b) for b in buffers)
-        return buffers
-
-    monkeypatch.setattr(
-        cudf.utils.ioutils, "_get_remote_bytes_parquet_footer", spy
-    )
-
-    num_rows, _num_row_groups, col_names, _, _ = cudf.io.read_parquet_metadata(
-        f"s3://{s3_bucket_public.name}/{fname}", storage_options=s3so
-    )
-
-    assert num_rows == len(big)
-    assert col_names == list(big.columns)
-
-    # Only the footer should have been transferred, not the whole file
-    assert size > 1_000_000, "test file is too small to be meaningful"
-    assert fetched, "footer prefetcher was not used"
-    assert max(fetched) < size / 100
-
-
-def test_read_parquet_metadata_footer_is_one_request_per_file(
-    s3_bucket_public, s3so, pdf
-):
-    """Footers are fetched with a single concurrent suffix read per file.
-
-    A size lookup would add an extra HEAD request per file, which matters when
-    collecting footers across many files.
-    """
-    import s3fs
-
-    n_files = 5
-    buffer = BytesIO()
-    pdf.to_parquet(path=buffer)
-    for i in range(n_files):
-        buffer.seek(0)
-        s3_bucket_public.put_object(
-            Key=f"footer_reqs_{i}.parquet", Body=buffer
-        )
-
-    fs = get_fs_token_paths("s3://", storage_options=s3so)[0]
-    fs.invalidate_cache()
-    paths = [
-        f"{s3_bucket_public.name}/footer_reqs_{i}.parquet"
-        for i in range(n_files)
-    ]
-
-    calls = []
-    original = s3fs.core.S3FileSystem._call_s3
-
-    async def spy(self, method, *args, **kwargs):
-        calls.append(method)
-        return await original(self, method, *args, **kwargs)
-
-    s3fs.core.S3FileSystem._call_s3 = spy
-    try:
-        buffers = cudf.utils.ioutils._get_remote_bytes_parquet_footer(
-            paths, fs
-        )
-    finally:
-        s3fs.core.S3FileSystem._call_s3 = original
-
-    assert len(buffers) == n_files
-    assert calls.count("get_object") == n_files
-    assert "head_object" not in calls
 
 
 def test_read_parquet_multi_file(s3_bucket_public, s3so, pdf):

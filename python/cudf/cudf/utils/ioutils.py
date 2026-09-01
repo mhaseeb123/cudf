@@ -103,16 +103,6 @@ Parameters
 ----------
 paths : List of strings or path objects
     Path of file(s) to be read
-storage_options : dict, optional, default None
-    Extra options that make sense for a particular storage connection,
-    e.g. host, port, username, password, etc. For HTTP(S) URLs the key-value
-    pairs are forwarded to ``urllib.request.Request`` as header options.
-    For other URLs (e.g. starting with "s3://", and "gcs://") the key-value
-    pairs are forwarded to ``fsspec.open``. Please see ``fsspec`` and
-    ``urllib`` for more details.
-filesystem : fsspec.AbstractFileSystem, default None
-    Filesystem object to use when reading the data. This argument
-    should not be used at the same time as ``storage_options``.
 
 Returns
 -------
@@ -2394,78 +2384,6 @@ def _get_remote_bytes_parquet(
     return buffers
 
 
-# Parquet file layout:
-#   [4-byte "PAR1" header][data][footer][4-byte footer length]["PAR1"]
-_PARQUET_MAGIC = b"PAR1"
-_PARQUET_HEADER_LEN = 4
-_PARQUET_ENDER_LEN = 8
-# Mirrors libcudf's LIBCUDF_PARQUET_METADATA_SIZE_HINT default. Footers smaller
-# than this are fetched in a single round trip.
-_PARQUET_FOOTER_SIZE_HINT = 64 * 1024
-
-
-def _get_remote_bytes_parquet_footer(remote_paths, fs, **kwargs):
-    """Fetch only the Parquet footer of each remote file.
-
-    Returns one buffer per path, shaped as ``PAR1 + <footer> + <ender>`` -- a
-    self-contained miniature Parquet file. libcudf locates the footer relative
-    to the *end* of a source, so these parse identically to the real files
-    while transferring O(footer) rather than O(file) bytes.
-
-    Falls back to handing libcudf a whole file for any input that does not
-    look like Parquet, so that it still reports its usual error.
-    """
-    hint = max(_PARQUET_FOOTER_SIZE_HINT, _PARQUET_ENDER_LEN)
-    n = len(remote_paths)
-
-    # Suffix ranges (negative start, per the fsspec `cat_file` contract) let us
-    # skip a size lookup, which would otherwise cost an extra request per file.
-    # `cat_ranges` fans out concurrently on async filesystems.
-    tails = fs.cat_ranges(remote_paths, [-hint] * n, [None] * n)
-
-    buffers: list[bytes | None] = [None] * n
-    # (index, start, prepend_magic) for paths needing a second round trip
-    refetch: list[tuple[int, int, bool]] = []
-
-    for i, tail in enumerate(tails):
-        if (
-            len(tail) <= _PARQUET_HEADER_LEN + _PARQUET_ENDER_LEN
-            or tail[-_PARQUET_HEADER_LEN:] != _PARQUET_MAGIC
-        ):
-            # Not a Parquet file we can shortcut. A short tail is already the
-            # whole file, so only a truncated one needs re-reading.
-            if len(tail) < hint:
-                buffers[i] = tail
-            else:
-                refetch.append((i, 0, False))
-            continue
-
-        footer_len = int.from_bytes(
-            tail[-_PARQUET_ENDER_LEN:-_PARQUET_HEADER_LEN], "little"
-        )
-        needed = footer_len + _PARQUET_ENDER_LEN
-        if needed <= len(tail):
-            buffers[i] = _PARQUET_MAGIC + tail[-needed:]
-        elif len(tail) < hint:
-            # Tail is the entire file, so `footer_len` is bogus. Hand the file
-            # over unmodified and let libcudf report the corruption.
-            buffers[i] = tail
-        else:
-            # Footer is larger than the speculative tail read
-            refetch.append((i, -needed, True))
-
-    if refetch:
-        chunks = fs.cat_ranges(
-            [remote_paths[i] for i, _, _ in refetch],
-            [start for _, start, _ in refetch],
-            [None] * len(refetch),
-        )
-        for (i, _, prepend_magic), chunk in zip(refetch, chunks, strict=True):
-            buffers[i] = _PARQUET_MAGIC + chunk if prepend_magic else chunk
-
-    return buffers
-
-
 def _prefetch_remote_buffers(
     paths,
     fs,
@@ -2478,13 +2396,12 @@ def _prefetch_remote_buffers(
         try:
             prefetcher = {
                 "parquet": _get_remote_bytes_parquet,
-                "parquet-footer": _get_remote_bytes_parquet_footer,
                 "all": _get_remote_bytes_all,
             }[method]
         except KeyError:
             raise ValueError(
                 f"{method} is not a supported remote-data prefetcher."
-                " Expected 'parquet', 'parquet-footer' or 'all'."
+                " Expected 'parquet' or 'all'."
             )
         return prefetcher(
             paths,
