@@ -48,16 +48,15 @@ struct row_mask_accessor {
    */
   explicit row_mask_accessor(cudf::column_view const& row_mask)
     : data{row_mask.begin<bool>()},
-      // Skip the validity check altogether if there are no nulls to resolve
-      null_mask{row_mask.null_count() ? row_mask.null_mask() : nullptr},
+      null_mask{row_mask.has_nulls() ? row_mask.null_mask() : nullptr},
       offset{row_mask.offset()}
   {
   }
 
   __device__ bool inline operator()(cudf::size_type row_idx) const noexcept
   {
-    auto const is_null = null_mask != nullptr and not bit_is_set(null_mask, offset + row_idx);
-    return is_null or data[row_idx];
+    if (data[row_idx]) { return true; }
+    return null_mask != nullptr and not bit_is_set(null_mask, offset + row_idx);
   }
 };
 
