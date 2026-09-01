@@ -2128,9 +2128,8 @@ class ParquetDatasetWriter:
             ioutils._validate_filesystem(filesystem, storage_options)
         self.filesystem = filesystem
 
-        # libcudf's chunked-writer sinks only understand local paths, so
-        # remote output is staged in a temporary directory and uploaded on
-        # `close()`.
+        # libcudf's chunked sinks only take local paths, so remote output is
+        # staged in a temp dir and uploaded in `close()`.
         is_remote = (
             filesystem is not None
             and not ioutils._is_local_filesystem(filesystem)
@@ -2183,8 +2182,7 @@ class ParquetDatasetWriter:
             preserve_index=self.common_args["index"],
         )
         if self.fs_meta.get("is_remote", False):
-            # `self.path` is a local staging directory here; the upload to the
-            # remote store happens in `close()`.
+            # `self.path` is the local staging dir (see `__init__`)
             fs = ioutils._ensure_filesystem(None, self.path, None)
         else:
             fs = ioutils._ensure_filesystem(

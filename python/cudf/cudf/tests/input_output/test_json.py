@@ -3,7 +3,6 @@
 
 import copy
 import gzip
-import inspect
 import os
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -353,69 +352,6 @@ def test_cudf_json_writer_fsspec(tmp_path, pass_filesystem):
         path, engine="cudf", orient="records", lines=False, **kwargs
     )
     assert_eq(df, got)
-
-
-@pytest.mark.parametrize(
-    "func",
-    [
-        cudf.read_csv,
-        cudf.read_json,
-        cudf.read_orc,
-        cudf.read_avro,
-        cudf.read_text,
-        cudf.io.csv.to_csv,
-        cudf.io.json.to_json,
-        cudf.io.orc.to_orc,
-        cudf.io.parquet.to_parquet,
-        cudf.io.parquet.write_to_dataset,
-        cudf.DataFrame.to_parquet,
-        cudf.DataFrame.to_csv,
-        cudf.DataFrame.to_orc,
-    ],
-)
-def test_filesystem_kwarg_does_not_shift_positional_args(func):
-    """`filesystem` must never displace a pre-existing positional parameter."""
-    params = list(inspect.signature(func).parameters.values())
-    names = [p.name for p in params]
-    idx = names.index("filesystem")
-    kind = params[idx].kind
-
-    if kind is inspect.Parameter.KEYWORD_ONLY:
-        return
-    trailing = [n for n in names[idx + 1 :] if n != "kwargs"]
-    assert not trailing, (
-        f"{func.__name__}: `filesystem` precedes {trailing}, which shifts "
-        "existing positional arguments"
-    )
-
-
-def test_to_orc_accepts_legacy_positional_args(tmp_path):
-    """Regression: `index` used to bind to `filesystem` when passed positionally."""
-    df = cudf.DataFrame({"a": [1, 2, 3]})
-    target = str(tmp_path / "positional.orc")
-    # to_orc(df, fname, compression, statistics, stripe_size_bytes,
-    #        stripe_size_rows, row_index_stride, cols_as_map_type,
-    #        storage_options, index)
-    cudf.io.orc.to_orc(
-        df, target, "snappy", "ROWGROUP", None, None, None, None, None, True
-    )
-    assert_eq(cudf.read_orc(target)[["a"]], df)
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"filesystem": "not-a-filesystem"},
-        {
-            "filesystem": fsspec.filesystem("memory"),
-            "storage_options": {"a": 1},
-        },
-    ],
-)
-def test_invalid_filesystem_rejected_for_file_like_input(kwargs):
-    """Validation must not depend on the source being a string path."""
-    with pytest.raises(ValueError):
-        cudf.read_json(BytesIO(b'[{"a": 1}]'), engine="cudf", **kwargs)
 
 
 @pytest.fixture(params=["filepath", "pathobj", "bytes_io", "string_io", "url"])

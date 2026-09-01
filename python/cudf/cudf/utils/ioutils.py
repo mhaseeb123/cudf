@@ -1872,8 +1872,7 @@ def get_reader_filepath_or_buffer(
 ):
     """{docstring}"""
 
-    # Validate up front so that a bad `filesystem` is rejected for every input
-    # type, not just string paths.
+    # Validate up front so file-like inputs are checked too, not just paths.
     if filesystem is not None:
         _validate_filesystem(filesystem, storage_options)
 
@@ -2007,9 +2006,8 @@ def get_writer_filepath_or_buffer(
             fs = filesystem
 
         if not _is_local_filesystem(fs):
-            # Note: the paths returned by `get_fs_token_paths` are not usable
-            # here -- in write mode it expands them into numbered `.part`
-            # names. Strip the protocol off the original path instead.
+            # Not `get_fs_token_paths`' paths: in write mode it expands
+            # them into numbered `.part` names. Strip the original instead.
             return fsspec.core.OpenFile(
                 fs, fs._strip_protocol(path_or_data), mode=mode or "w"
             )
@@ -2207,10 +2205,8 @@ def _ensure_filesystem(passed_filesystem, path, storage_options):
             path[0] if isinstance(path, list) else path,
             storage_options={} if storage_options is None else storage_options,
         )[0]
-    # Note: `storage_options` is deliberately not checked for conflicts here.
-    # Internal callers (e.g. dask-cudf's `CudfEngine.write_partition`) legitimately
-    # pass both a resolved filesystem and the `storage_options` that produced it.
-    # The mutual-exclusion check belongs at the public `filesystem=` boundary.
+    # No `storage_options` conflict check: internal callers (dask-cudf's
+    # `write_partition`) pass both. That check lives at the public boundary.
     _validate_filesystem(passed_filesystem)
     return passed_filesystem
 
