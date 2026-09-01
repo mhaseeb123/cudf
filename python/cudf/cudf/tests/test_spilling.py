@@ -521,7 +521,8 @@ def test_df_transpose(manager: SpillManager):
 
 
 def test_memory_usage_of_sliced_nested_column(manager: SpillManager):
-    # Computing memory usage of a sliced list column reads its offsets from device memory, which must spill lock the underlying buffers.
+    # Computing memory usage of a sliced list column reads its offsets
+    # from device memory, which must spill lock the underlying buffers
     df = cudf.Series([[1, 2], [3, 4], [5, 6]])[1:]
     assert df.memory_usage() == 44
     for child_index in range(2):
