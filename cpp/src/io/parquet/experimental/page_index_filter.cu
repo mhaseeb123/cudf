@@ -765,8 +765,6 @@ thrust::host_vector<bool> aggregate_reader_metadata::compute_data_page_mask(
     std::cmp_equal(total_rows, row_mask.size()),
     "Encountered a mismatch in number of rows in the row group pass and the row mask size",
     std::overflow_error);
-  CUDF_EXPECTS(
-    row_mask.null_count() == 0, "Row mask must not contain nulls", std::invalid_argument);
 
   // Return an empty vector if all rows are required
   if (are_all_rows_retained(row_mask, stream)) { return thrust::host_vector<bool>{}; }
