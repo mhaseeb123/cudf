@@ -118,7 +118,7 @@ def hybrid_scan_multifile_reader(
     reader.setup_page_indexes(
         [
             memoryview(source)[
-                byte_range.offset: byte_range.offset + byte_range.size
+                byte_range.offset : byte_range.offset + byte_range.size
             ]
             for source, byte_range in zip(
                 parquet_bytes,
@@ -222,7 +222,7 @@ def test_hybrid_scan_multifile_materialize_payload_pages(
         else plc.gpumemoryview(
             rmm.DeviceBuffer.to_device(
                 memoryview(parquet_bytes[source])[
-                    byte_range.offset: byte_range.offset + byte_range.size
+                    byte_range.offset : byte_range.offset + byte_range.size
                 ],
                 plc.utils._get_stream(stream),
             )
@@ -234,7 +234,7 @@ def test_hybrid_scan_multifile_materialize_payload_pages(
     # The data page mask is inferred from the fetched page data
     hybrid_scan_multifile_reader.setup_chunking_for_payload_columns(
         1024,  # chunk_read_limit
-        0,     # pass_read_limit
+        0,  # pass_read_limit
         row_groups,
         row_mask,
         page_data,
