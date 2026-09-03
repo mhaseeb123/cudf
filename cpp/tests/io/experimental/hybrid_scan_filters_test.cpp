@@ -859,8 +859,8 @@ TYPED_TEST(PageFilteringWithPageIndexStats, FilterPages)
 
 TEST_F(HybridScanFiltersTest, RowMaskNullsAreRetained)
 {
-  auto constexpr nan = std::numeric_limits<double>::quiet_NaN();
-  auto const input   = cudf::test::fixed_width_column_wrapper<double>{{3.0, nan, 1.0, 4.0}};
+  auto const input = cudf::test::fixed_width_column_wrapper<double>{
+    {3.0, 0.0, 1.0, 0.0}, {true, false, true, false}};
   auto const table   = cudf::table_view{{input}};
   auto buffer        = std::vector<char>{};
 
@@ -873,10 +873,8 @@ TEST_F(HybridScanFiltersTest, RowMaskNullsAreRetained)
       .build();
   cudf::io::write_parquet(writer_options);
 
-  auto scalar     = cudf::numeric_scalar<double>{2.0};
-  auto literal    = cudf::ast::literal{scalar};
   auto column_ref = cudf::ast::column_name_reference{"col"};
-  auto filter     = cudf::ast::operation{cudf::ast::ast_operator::GREATER, column_ref, literal};
+  auto filter     = cudf::ast::operation{cudf::ast::ast_operator::IS_NULL, column_ref};
   auto options    = cudf::io::parquet_reader_options::builder().filter(filter).build();
 
   auto datasource = cudf::io::datasource::create(cudf::host_span<std::byte const>{
@@ -898,7 +896,8 @@ TEST_F(HybridScanFiltersTest, RowMaskNullsAreRetained)
 
   auto const byte_ranges = reader.filter_column_chunks_byte_ranges(row_groups, options);
   auto [column_buffers, column_data, read_tasks] =
-    cudf::io::parquet::fetch_byte_ranges_to_device_async(*datasource, byte_ranges, stream, mr);
+    cudf::io::parquet::fetch_byte_ranges_to_device_async(
+      *datasource, byte_ranges, cudf::io::parquet::io_submission_policy::SERIALIZE, stream, mr);
   read_tasks.get();
 
   auto row_mask_view = row_mask->mutable_view();
@@ -911,7 +910,8 @@ TEST_F(HybridScanFiltersTest, RowMaskNullsAreRetained)
                                       stream,
                                       mr);
 
-  auto const expected = cudf::test::fixed_width_column_wrapper<double>{{3.0, 4.0}};
+  auto const expected =
+    cudf::test::fixed_width_column_wrapper<double>{{0.0, 0.0}, {false, false}};
   CUDF_TEST_EXPECT_TABLES_EQUAL(cudf::table_view{{expected}}, result.tbl->view());
 }
 
@@ -1029,7 +1029,11 @@ TEST_F(HybridScanFiltersTest, NoOffsetIndexListColumns)
   auto const list_byte_ranges =
     list_reader.payload_column_chunks_byte_ranges(list_row_groups, options);
   auto [list_buffers, list_data, list_tasks] = cudf::io::parquet::fetch_byte_ranges_to_device_async(
-    *list_datasource, list_byte_ranges, stream, mr);
+    *list_datasource,
+    list_byte_ranges,
+    cudf::io::parquet::io_submission_policy::SERIALIZE,
+    stream,
+    mr);
   list_tasks.get();
 
   auto const list_result = list_reader.materialize_payload_columns(
@@ -1040,7 +1044,7 @@ TEST_F(HybridScanFiltersTest, NoOffsetIndexListColumns)
     options,
     stream,
     mr);
-  auto const list_expected = cudf::apply_boolean_mask(list_table, list_row_mask_view, stream, mr);
+  auto const list_expected = cudf::apply_retention_mask(list_table, list_row_mask_view, stream, mr);
   CUDF_TEST_EXPECT_TABLES_EQUIVALENT(list_expected->view(), list_result.tbl->view());
 }
 
