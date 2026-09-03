@@ -6455,6 +6455,16 @@ TEST_F(ParquetReaderTest, MismatchedSchemaColumnValidation)
                           .build()));
       CUDF_TEST_EXPECT_TABLES_EQUAL(expected, result.tbl->view());
     }
+
+    for (auto const& paths : {std::vector<std::string>{with_ids, without_ids},
+                              std::vector<std::string>{without_ids, with_ids}}) {
+      auto const opts =
+        cudf::io::parquet_reader_options::builder(cudf::io::source_info{paths})
+          .allow_mismatched_pq_schemas(true)
+          .column_field_ids({1})
+          .build();
+      EXPECT_THROW(cudf::io::read_parquet(opts), std::invalid_argument);
+    }
   }
 }
 
