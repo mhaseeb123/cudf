@@ -2303,9 +2303,7 @@ TEST_F(ParquetReaderTest, ExtendedFilterExpressions)
       cudf::io::parquet_reader_options::builder(cudf::io::source_info{filepath}).filter(filter);
     auto result = cudf::io::read_parquet(read_opts);
     CUDF_TEST_EXPECT_TABLES_EQUAL(*result.tbl, *expected);
-    // The `false` conjunct constrains nothing statistics can evaluate, so it is dropped and the
-    // remaining conjunct still prunes. Dropping a conjunct only ever keeps more row groups than
-    // the filter needs, never fewer.
+    // Stats filter cannot prune `false`, but still prunes on 50 > col_a
     EXPECT_EQ(result.metadata.num_row_groups_after_stats_filter.value(), 1);
   }
 
