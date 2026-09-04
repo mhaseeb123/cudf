@@ -389,7 +389,7 @@ class hybrid_scan_multifile {
    * @param pass_read_limit Limit on the memory used for reading and decompressing data. `0` if
    * there is no limit
    * @param row_group_indices Span of vectors of input row group indices, one per source
-   * @param row_mask Mutable boolean column spanning all selected rows across all sources
+   * @param row_mask Boolean column spanning all selected rows across all sources
    * indicating surviving rows
    * @param mask_data_pages Whether to build and use a data page mask using the row mask
    * @param column_chunk_data Flattened device spans of filter column chunk data returned in the
