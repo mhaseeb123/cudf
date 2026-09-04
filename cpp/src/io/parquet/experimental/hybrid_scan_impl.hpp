@@ -389,8 +389,11 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
 
   /**
    * @brief Compute a data page mask from the decoded page headers.
+   *
+   * @param row_mask Boolean column indicating which rows need to be read
    */
-  [[nodiscard]] thrust::host_vector<bool> compute_data_page_mask_with_page_headers();
+  [[nodiscard]] thrust::host_vector<bool> compute_data_page_mask_with_page_headers(
+    cudf::column_view const& row_mask);
 
   /**
    * @brief Mark output buffers nullable when page pruning synthesizes null rows
@@ -455,14 +458,15 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
    * @param row_group_indices Row group indices to read
    * @param column_chunk_data Device spans containing column chunk data, or page data when sparse
    *        page I/O is enabled
-   * @param data_page_mask Input data page mask from page-pruning step
+   * @param row_mask Optional boolean column indicating surviving rows. `std::nullopt` indicates all
+   * rows are surviving
    */
   void prepare_data(read_mode mode,
                     std::span<std::vector<size_type> const> row_group_indices,
                     std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
-                    host_span<bool const> data_page_mask);
+                    std::optional<cudf::column_view> row_mask);
 
-  /**
+  /**row_mask
    * @brief Create descriptors for filter column chunks and decode dictionary page headers
    *
    * @param row_group_indices The row groups to read
@@ -500,10 +504,13 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
    * @param column_chunk_data Device spans containing column chunk data, or page data when sparse
    *        page I/O is enabled
    * @param data_page_mask Input data page mask for the current pass
+   * @param row_mask Optional boolean column indicating surviving rows. `std::nullopt` indicates all
+   * rows are surviving
    */
   void handle_chunking(read_mode mode,
                        std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
-                       host_span<bool const> data_page_mask);
+                       host_span<bool const> data_page_mask,
+                       std::optional<cudf::column_view> row_mask);
 
   /**
    * @brief Setup step for the next input read pass.
@@ -514,9 +521,12 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
    * @param column_chunk_data Device spans containing column chunk data, or page data when sparse
    *        page I/O is enabled
    * @param data_page_mask Input data page mask for the current pass
+   * @param row_mask Optional boolean column indicating surviving rows. `std::nullopt` indicates all
+   * rows are surviving
    */
   void setup_next_pass(std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
-                       std::span<bool const> data_page_mask);
+                       std::span<bool const> data_page_mask,
+                       std::optional<cudf::column_view> row_mask);
 
   /**
    * @brief Setup pointers to columns chunks to be processed for this pass.
@@ -623,11 +633,6 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
   aggregate_reader_metadata* _extended_metadata;
 
   std::optional<std::vector<std::string>> _filter_columns_names;
-
-  // Non-owning view of the caller's row mask, only valid for the duration of a single
-  // materialization or chunking setup call, during which the pass page mask is computed. Null
-  // entries mean the row could not be pruned and is therefore treated as a surviving row.
-  cudf::column_view _row_mask{};
 
   std::vector<cudf::io::detail::inline_column_buffer> _original_output_buffers_template;
 

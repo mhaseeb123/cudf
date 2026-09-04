@@ -480,7 +480,7 @@ thrust::host_vector<bool> compute_row_range_selection_mask(
   cuda::stream_ref stream)
 {
   // Need at least two offsets (or one range) to search the Fenwick tree
-  if (page_row_offsets.size() < 2) return thrust::host_vector<bool>{};
+  if (page_row_offsets.size() < 2) { return thrust::host_vector<bool>{}; }
 
   auto const total_rows         = row_mask.size();
   auto const mr                 = cudf::get_current_device_resource_ref();

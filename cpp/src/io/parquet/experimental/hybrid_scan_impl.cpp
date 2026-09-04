@@ -730,14 +730,10 @@ table_with_metadata hybrid_scan_reader_impl::materialize_filter_columns(
     return read_chunk_internal(read_mode::READ_ALL, read_columns_mode::FILTER_COLUMNS, row_mask);
   }
 
-  auto data_page_mask = thrust::host_vector<bool>{};
-  if (mask_data_pages == use_data_page_mask::YES) {
-    _row_mask      = row_mask;
-    data_page_mask = _extended_metadata->compute_data_page_mask(
-      _row_mask, row_group_indices, _input_columns, stream);
-  }
-
-  prepare_data(read_mode::READ_ALL, row_group_indices, column_chunk_data, data_page_mask);
+  auto const retention_mask = mask_data_pages == use_data_page_mask::YES
+                                ? std::optional<cudf::column_view>{cudf::column_view{row_mask}}
+                                : std::nullopt;
+  prepare_data(read_mode::READ_ALL, row_group_indices, column_chunk_data, retention_mask);
 
   return read_chunk_internal(read_mode::READ_ALL, read_columns_mode::FILTER_COLUMNS, row_mask);
 }
@@ -769,14 +765,10 @@ table_with_metadata hybrid_scan_reader_impl::materialize_payload_columns(
     return read_chunk_internal(read_mode::READ_ALL, read_columns_mode::PAYLOAD_COLUMNS, row_mask);
   }
 
-  auto data_page_mask = thrust::host_vector<bool>{};
-  if (not row_mask.is_empty() and mask_data_pages == use_data_page_mask::YES) {
-    _row_mask      = row_mask;
-    data_page_mask = _extended_metadata->compute_data_page_mask(
-      _row_mask, row_group_indices, _input_columns, stream);
-  }
-
-  prepare_data(read_mode::READ_ALL, row_group_indices, column_chunk_data, data_page_mask);
+  auto const retention_mask = mask_data_pages == use_data_page_mask::YES
+                                ? std::optional<cudf::column_view>{row_mask}
+                                : std::nullopt;
+  prepare_data(read_mode::READ_ALL, row_group_indices, column_chunk_data, retention_mask);
 
   return read_chunk_internal(read_mode::READ_ALL, read_columns_mode::PAYLOAD_COLUMNS, row_mask);
 }
@@ -841,14 +833,9 @@ void hybrid_scan_reader_impl::setup_chunking_for_filter_columns(
     return;
   }
 
-  auto data_page_mask = thrust::host_vector<bool>{};
-  if (mask_data_pages == use_data_page_mask::YES) {
-    _row_mask      = row_mask;
-    data_page_mask = _extended_metadata->compute_data_page_mask(
-      _row_mask, row_group_indices, _input_columns, stream);
-  }
-
-  prepare_data(read_mode::CHUNKED_READ, row_group_indices, column_chunk_data, data_page_mask);
+  auto const retention_mask =
+    mask_data_pages == use_data_page_mask::YES ? std::optional{row_mask} : std::nullopt;
+  prepare_data(read_mode::CHUNKED_READ, row_group_indices, column_chunk_data, retention_mask);
 }
 
 table_with_metadata hybrid_scan_reader_impl::materialize_filter_columns_chunk(
@@ -902,14 +889,9 @@ void hybrid_scan_reader_impl::setup_chunking_for_payload_columns(
     return;
   }
 
-  auto data_page_mask = thrust::host_vector<bool>{};
-  if (not row_mask.is_empty() and mask_data_pages == use_data_page_mask::YES) {
-    _row_mask      = row_mask;
-    data_page_mask = _extended_metadata->compute_data_page_mask(
-      _row_mask, row_group_indices, _input_columns, stream);
-  }
-
-  prepare_data(read_mode::CHUNKED_READ, row_group_indices, column_chunk_data, data_page_mask);
+  auto const retention_mask =
+    mask_data_pages == use_data_page_mask::YES ? std::optional{row_mask} : std::nullopt;
+  prepare_data(read_mode::CHUNKED_READ, row_group_indices, column_chunk_data, retention_mask);
 }
 
 void hybrid_scan_reader_impl::setup_chunking_for_payload_columns(
@@ -1138,7 +1120,6 @@ void hybrid_scan_reader_impl::reset_internal_state()
   _strings_to_categorical  = false;
   _reader_column_schema.reset();
 
-  _row_mask        = column_view{};
   _row_mask_offset = 0;
 
   _expr_conv = parquet_filter_normalizer{};
@@ -1196,7 +1177,7 @@ void hybrid_scan_reader_impl::prepare_data(
   read_mode mode,
   std::span<std::vector<size_type> const> row_group_indices,
   std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
-  host_span<bool const> data_page_mask)
+  std::optional<cudf::column_view> row_mask)
 {
   // if we have not preprocessed at the whole-file level, do that now
   if (not _file_preprocessed) {
@@ -1207,14 +1188,18 @@ void hybrid_scan_reader_impl::prepare_data(
     prepare_row_groups(read_mode::READ_ALL, row_group_indices);
   }
 
+  // Compute data page mask from the row (retention) mask
+  auto data_page_mask = thrust::host_vector<bool>{};
+  if (_has_offset_index and row_mask.has_value() and not _sparse_page_io) {
+    data_page_mask = _extended_metadata->compute_data_page_mask(
+      row_mask.value(), row_group_indices, _input_columns, _stream);
+  }
+
   // handle any chunking work (ratcheting through the subpasses and chunks within
   // our current pass) if in bounds
   if (_file_itm_data._current_input_pass < _file_itm_data.num_passes()) {
-    handle_chunking(mode, column_chunk_data, data_page_mask);
+    handle_chunking(mode, column_chunk_data, data_page_mask, row_mask);
   }
-
-  // Clear the cached row mask column view
-  _row_mask = cudf::column_view{};
 }
 
 template <typename RowMaskView>
@@ -1491,12 +1476,13 @@ void hybrid_scan_reader_impl::set_pass_page_mask(std::span<bool const> data_page
   mark_buffers_nullable_for_pruned_pages();
 }
 
-thrust::host_vector<bool> hybrid_scan_reader_impl::compute_data_page_mask_with_page_headers()
+thrust::host_vector<bool> hybrid_scan_reader_impl::compute_data_page_mask_with_page_headers(
+  cudf::column_view const& row_mask)
 {
   auto const& pass = *_pass_itm_data;
 
   // Return an empty vector if all rows are required
-  if (are_all_rows_retained(_row_mask, _stream)) { return thrust::host_vector<bool>(0); }
+  if (are_all_rows_retained(row_mask, _stream)) { return thrust::host_vector<bool>{}; }
 
   std::vector<cudf::size_type> page_row_offsets;
   page_row_offsets.reserve(pass.pages.size() * 2);
@@ -1539,10 +1525,10 @@ thrust::host_vector<bool> hybrid_scan_reader_impl::compute_data_page_mask_with_p
   auto data_page_mask = thrust::host_vector<bool>{};
 
   // Compute the row range mask
-  CUDF_EXPECTS(std::cmp_equal(_row_mask.size(), pass.num_rows),
+  CUDF_EXPECTS(std::cmp_equal(row_mask.size(), pass.num_rows),
                "Row mask must span across all rows in the pass");
   auto const row_range_mask =
-    compute_row_range_selection_mask(_row_mask, page_row_offsets, max_page_size, _stream);
+    compute_row_range_selection_mask(row_mask, page_row_offsets, max_page_size, _stream);
 
   if (row_range_mask.empty()) { return data_page_mask; }
 

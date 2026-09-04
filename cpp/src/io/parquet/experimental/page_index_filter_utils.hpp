@@ -71,7 +71,7 @@ compute_page_row_offsets_and_colchunk_page_offsets(
   rmm::device_async_resource_ref mr);
 
 /**
- * @brief Checks whether every row is reatained by the boolean row mask
+ * @brief Checks whether every row is retained by the boolean row mask
  *
  * Null entries in the row mask are treated as surviving rows
  *

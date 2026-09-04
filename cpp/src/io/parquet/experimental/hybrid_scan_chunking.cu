@@ -33,12 +33,13 @@ using parquet::detail::pass_intermediate_data;
 void hybrid_scan_reader_impl::handle_chunking(
   read_mode mode,
   std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
-  host_span<bool const> data_page_mask)
+  host_span<bool const> data_page_mask,
+  std::optional<cudf::column_view> row_mask)
 {
   // if this is our first time in here, setup the first pass.
   if (!_pass_itm_data) {
     // setup the next pass
-    setup_next_pass(column_chunk_data, data_page_mask);
+    setup_next_pass(column_chunk_data, data_page_mask, row_mask);
   }
 
   auto& pass = *_pass_itm_data;
@@ -76,7 +77,8 @@ void hybrid_scan_reader_impl::handle_chunking(
 
 void hybrid_scan_reader_impl::setup_next_pass(
   std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
-  std::span<bool const> data_page_mask)
+  std::span<bool const> data_page_mask,
+  std::optional<cudf::column_view> row_mask)
 {
   auto const num_passes = _file_itm_data.num_passes();
   CUDF_EXPECTS(num_passes == 1,
@@ -129,8 +131,8 @@ void hybrid_scan_reader_impl::setup_next_pass(
       // When offset index is absent, compute and use the data page mask using the decoded page
       // headers from `setup_compressed_data`.
       auto const data_page_mask_pghdr = [&]() {
-        if (not _has_offset_index and not _row_mask.is_empty()) {
-          return compute_data_page_mask_with_page_headers();
+        if (not _has_offset_index and row_mask.has_value()) {
+          return compute_data_page_mask_with_page_headers(row_mask.value());
         }
         return thrust::host_vector<bool>{};
       }();
