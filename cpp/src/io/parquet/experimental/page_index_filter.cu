@@ -11,6 +11,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/nvtx/ranges.hpp>
 #include <cudf/detail/utilities/host_worker_pool.hpp>
+#include <cudf/logger.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
 #include <cudf/utilities/memory_resource.hpp>
@@ -189,6 +190,7 @@ struct page_stats_caster : public stats_caster_base {
     if constexpr (cudf::is_compound<T>() and not cuda::std::is_same_v<T, string_view>) {
       CUDF_FAIL("Compound types other than strings do not have statistics");
     } else {
+      // Compute page row offsets, and page-statistics (min, max and all-null) host columns.
       auto [page_row_offsets, min, max, all_null] = compute_host_data<T>(schema_idx, dtype, stream);
 
       std::vector<std::unique_ptr<column>> columns;
@@ -258,6 +260,7 @@ std::unique_ptr<cudf::column> aggregate_reader_metadata::build_row_mask_with_pag
                     stats_column_schemas.push_back(output_column_schemas[col_idx]);
                   }
                 });
+
   // Return early if no participating columns
   if (stats_column_schemas.empty()) {
     return build_all_true_row_mask(row_group_indices, stream, mr);
@@ -283,6 +286,7 @@ std::unique_ptr<cudf::column> aggregate_reader_metadata::build_row_mask_with_pag
                                     .per_file_metadata = per_file_metadata,
                                     .row_group_indices = row_group_indices};
 
+  // Build page-statistics inputs for each participating column.
   std::vector<page_statistics_input> stats_inputs;
   stats_inputs.reserve(stats_column_schemas.size());
   std::for_each(cuda::counting_iterator<std::size_t>{0},
