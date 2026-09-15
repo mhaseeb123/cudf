@@ -16,6 +16,7 @@
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/logger.hpp>
+#include <cudf/scalar/scalar.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/bit.hpp>
@@ -656,13 +657,15 @@ std::unique_ptr<column> compute_row_mask_from_page_stats(
   CUDF_EXPECTS(
     total_rows > 0, "Parquet row groups must contain at least one row", cudf::logic_error);
 
+  auto const temp_mr = cudf::get_current_device_resource_ref();
+
   // Return an all true row mask if no compacted page statistics are provided
   if (inputs.empty()) {
     CUDF_LOG_WARN(
       "At least one set of compacted page statistics is required. Falling back to an all true row "
       "mask.");
-    return cudf::make_numeric_column(
-      data_type{type_id::BOOL8}, total_rows, mask_state::UNALLOCATED, stream, mr);
+    auto const true_scalar = cudf::numeric_scalar<bool>{true, true, stream, temp_mr};
+    return cudf::make_column_from_scalar(true_scalar, total_rows, stream, mr);
   }
 
   // Ensure all compacted page statistics refer to a valid input column, are internally consistent,
@@ -679,8 +682,6 @@ std::unique_ptr<column> compute_row_mask_from_page_stats(
                            }),
                "Compacted page statistics inputs are invalid",
                std::invalid_argument);
-
-  auto const temp_mr = cudf::get_current_device_resource_ref();
 
   // Total page row offsets across all input columns
   auto const total_page_row_offsets = std::accumulate(
