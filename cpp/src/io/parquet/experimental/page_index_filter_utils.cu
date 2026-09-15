@@ -377,8 +377,7 @@ constexpr auto min_segments_for_device_offsets = 1024;
     std::swap(all_page_row_offsets, segment_row_offsets);
   });
 
-  // An input that repeats a boundary, which a zero-row page would do, repeats it in the union as
-  // well because `std::set_union` keeps as many copies as the input with the most of them.
+  // A zero-row page repeats a boundary. `std::set_union` preserves the duplicate in the union.
   all_page_row_offsets.erase(std::unique(all_page_row_offsets.begin(), all_page_row_offsets.end()),
                              all_page_row_offsets.end());
 
@@ -406,6 +405,7 @@ constexpr auto min_segments_for_device_offsets = 1024;
   auto const unique_end = thrust::unique(
     rmm::exec_policy_nosync(stream, mr), segment_row_offsets.begin(), segment_row_offsets.end());
   segment_row_offsets.resize(cuda::std::distance(segment_row_offsets.begin(), unique_end), stream);
+
   return segment_row_offsets;
 }
 
