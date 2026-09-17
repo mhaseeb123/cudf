@@ -457,7 +457,7 @@ TEST_F(HybridScanTest, ConsecutivePrunedPageOffsets)
 
   auto const input = cudf::table_view{{col0, col1, *col2, *col3, *col4}};
 
-  std::string filepath = "ConsecutivePrunedPageOffsets.parquet";
+  auto const filepath = temp_env->get_temp_filepath("ConsecutivePrunedPageOffsets.parquet");
   {
     auto metadata = cudf::io::table_input_metadata(input);
     metadata.column_metadata[0].set_name("col0");
@@ -1395,7 +1395,11 @@ TEST_F(HybridScanTest, RowGroupPassesMatchesChunkedReader)
       *footer_buffer, options);
 
     auto const all_row_groups = reader->all_row_groups(options);
-    auto const passes         = reader->construct_row_group_passes(all_row_groups, pass_read_limit);
+    auto const passes         = reader->construct_row_group_passes(
+      cudf::io::parquet::experimental::read_columns_mode::ALL_COLUMNS,
+      all_row_groups,
+      pass_read_limit,
+      options);
 
     for (auto const& pass_row_groups : passes) {
       auto const chunk_byte_ranges =
