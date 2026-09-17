@@ -522,6 +522,13 @@ void parquet_expression_simplifier::validate_column_reference(
                std::out_of_range);
 }
 
+ast::expression const& parquet_expression_simplifier::placeholder_expr()
+{
+  static cudf::numeric_scalar<bool> always_true_scalar{true};
+  static ast::literal const always_true{always_true_scalar};
+  return always_true;
+}
+
 void parquet_expression_simplifier::validate_operands(ast::expression const& expr) const
 {
   // Validate column references and traverse operations. Literals don't really need validation.
