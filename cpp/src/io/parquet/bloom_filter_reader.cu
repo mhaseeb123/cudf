@@ -478,8 +478,8 @@ simplified_expression_opt equality_literals_collector::simplify_comparison(
   // native precision as the literal would never match the native values.
   if (not _output_column_schemas.empty() and cudf::is_timestamp(_output_dtypes[col_idx])) {
     auto const schema_idx = _output_column_schemas[col_idx];
-    auto const& schema   = _schema_tree[schema_idx];
-    auto const clockrate = cudf::io::detail::to_clockrate(_output_dtypes[col_idx].id());
+    auto const& schema    = _schema_tree[schema_idx];
+    auto const clockrate  = cudf::io::detail::to_clockrate(_output_dtypes[col_idx].id());
     if (schema.logical_type.has_value() and
         calc_timestamp_scale(schema.logical_type, clockrate) != 0) {
       return std::nullopt;

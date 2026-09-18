@@ -524,9 +524,7 @@ void parquet_expression_simplifier::validate_column_reference(
 
 ast::expression const& parquet_expression_simplifier::placeholder_expr()
 {
-  static cudf::numeric_scalar<bool> always_true_scalar{true};
-  static ast::literal const always_true{always_true_scalar};
-  return always_true;
+  return _tree.push(ast::column_reference{0});
 }
 
 void parquet_expression_simplifier::validate_operands(ast::expression const& expr) const

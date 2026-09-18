@@ -365,8 +365,7 @@ class parquet_expression_simplifier {
   void validate_column_reference(ast::column_reference const& col_ref) const;
 
   /**
-   * @brief Returns a static placeholder always true literal for collectors to preserve logical
-   * folding.
+   * @brief Returns a placeholder column reference for collectors to preserve logical folding
    */
   [[nodiscard]] ast::expression const& placeholder_expr();
 
