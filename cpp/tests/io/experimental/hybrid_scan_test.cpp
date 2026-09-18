@@ -1469,9 +1469,9 @@ TEST_F(HybridScanTest, MisusePassesThrows)
   }
 
   // Filter so FILTER_COLUMNS has something to select
-  auto const literal_value = cudf::numeric_scalar<int32_t>(0, true, stream);
-  auto const literal       = cudf::ast::literal(literal_value);
-  auto const col_ref       = cudf::ast::column_name_reference("col0");
+  auto literal_value     = cudf::numeric_scalar<int32_t>(0, true, stream);
+  auto const literal     = cudf::ast::literal(literal_value);
+  auto const col_ref     = cudf::ast::column_name_reference("col0");
   auto const filter_expr = cudf::ast::operation(cudf::ast::ast_operator::GREATER, col_ref, literal);
   auto options           = cudf::io::parquet_reader_options::builder().filter(filter_expr).build();
 
