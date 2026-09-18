@@ -16,6 +16,7 @@
 
 #include <cuda/stream>
 
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <utility>
@@ -61,10 +62,10 @@ enum class use_data_page_mask : bool {
 /**
  * @brief Columns to consider when constructing row group passes
  */
-enum class read_columns_mode {
-  FILTER_COLUMNS,   ///< Filter columns
-  PAYLOAD_COLUMNS,  ///< Payload columns
-  ALL_COLUMNS       ///< All selected columns
+enum class read_columns_mode : int8_t {
+  FILTER_COLUMNS  = 0,  ///< Filter columns
+  PAYLOAD_COLUMNS = 1,  ///< Payload columns
+  ALL_COLUMNS     = 2   ///< All selected columns
 };
 
 /**

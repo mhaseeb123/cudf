@@ -466,19 +466,18 @@ public class HybridScanReaderTest extends CudfTestBase {
   }
 
   /**
-   * Verifies payloadColumnChunksByteRanges() returns ranges for all projected columns when
-   * called BEFORE any filter-column operation has populated the reader's filter
-   * column-name cache (_filter_columns_names in C++). In this pre-filter-pipeline state,
-   * the C++ select_payload_columns receives an empty filter-column set and skips the
-   * filter-column exclusion step. Result: 3 projected columns × 3 row groups = 9 ranges.
-   * See {@link #testPayloadColumnChunksByteRangesAfterFilterColumnsCall} for the
-   * post-pipeline contract (filter column excluded → 6 ranges).
+   * Verifies payloadColumnChunksByteRanges() excludes the filter column even when called
+   * BEFORE filterColumnChunksByteRanges. select_payload_columns now auto-populates the
+   * filter column-name cache from the options' filter expression when it has not yet been
+   * populated, so payload selection consistently excludes the filter column. With filter
+   * zip_code > 50,000: 2 payload columns × 3 row groups = 6 ranges.
    */
   @Test
   void testPayloadColumnChunksByteRangesWithFilter(@TempDir Path tmp) throws IOException {
     try (OpenReader open = OpenReader.standard(tmp).withFilter("zip_code", BinaryOperator.GREATER, 50000)) {
       ByteRange[] ranges = open.reader.payloadColumnChunksByteRanges(open.reader.allRowGroups());
-      assertEquals(9, ranges.length, "3 projected columns × 3 row groups (filter column not excluded)");
+      assertEquals(6, ranges.length,
+          "Filter column zip_code excluded from payload columns: 2 cols × 3 row groups");
       for (ByteRange r : ranges) {
         assertTrue(r.size() > 0);
       }
