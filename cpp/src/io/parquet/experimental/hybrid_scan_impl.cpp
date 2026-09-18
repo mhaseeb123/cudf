@@ -236,6 +236,12 @@ void hybrid_scan_reader_impl::setup_page_indexes(
 void hybrid_scan_reader_impl::select_columns(read_columns_mode read_columns_mode,
                                              parquet_reader_options const& options)
 {
+  CUDF_EXPECTS(read_columns_mode == read_columns_mode::FILTER_COLUMNS ||
+                 read_columns_mode == read_columns_mode::PAYLOAD_COLUMNS ||
+                 read_columns_mode == read_columns_mode::ALL_COLUMNS,
+               "Invalid read columns mode",
+               std::invalid_argument);
+
   // Initialize reader configuration.
   initialize_reader_config(options);
 
@@ -297,6 +303,9 @@ void hybrid_scan_reader_impl::select_columns(read_columns_mode read_columns_mode
 
   // Reset the materialization step flag
   _output_chunk_produced = false;
+
+  // Reset the file preprocessed flag
+  _file_preprocessed = false;
 
   CUDF_EXPECTS(_input_columns.size() > 0 and _output_buffers.size() > 0, "No columns selected");
 

@@ -1442,3 +1442,56 @@ TEST_F(HybridScanTest, RowGroupPassesMatchesChunkedReader)
                                        cuda::std::get<1>(iter)->view());
   });
 }
+
+TEST_F(HybridScanTest, MisusePassesThrows)
+{
+  auto constexpr num_rg      = 4;
+  auto constexpr rows_per_rg = 1'000;
+
+  auto values = cuda::counting_iterator(0);
+  cudf::test::fixed_width_column_wrapper<int32_t> col0(values, values + rows_per_rg);
+  cudf::test::fixed_width_column_wrapper<float> col1(values, values + rows_per_rg);
+  auto chunk_table = cudf::table_view{{col0, col1}};
+
+  auto const stream = cudf::get_default_stream();
+  auto const mr     = cudf::get_current_device_resource_ref();
+
+  auto const parquet_filepath = temp_env->get_temp_filepath("MisusePassesThrows.parquet");
+  {
+    auto full_table = cudf::concatenate(std::vector<cudf::table_view>(num_rg, chunk_table), stream);
+    auto opts = cudf::io::parquet_writer_options::builder(cudf::io::sink_info{parquet_filepath},
+                                                          full_table->view())
+                  .row_group_size_rows(rows_per_rg)
+                  .max_page_fragment_size(rows_per_rg)
+                  .build();
+    cudf::io::write_parquet(opts, stream);
+    stream.sync();
+  }
+
+  // Filter so FILTER_COLUMNS has something to select
+  auto const literal_value = cudf::numeric_scalar<int32_t>(0, true, stream);
+  auto const literal       = cudf::ast::literal(literal_value);
+  auto const col_ref       = cudf::ast::column_name_reference("col0");
+  auto const filter_expr = cudf::ast::operation(cudf::ast::ast_operator::GREATER, col_ref, literal);
+  auto options           = cudf::io::parquet_reader_options::builder().filter(filter_expr).build();
+
+  auto datasource          = cudf::io::datasource::create(parquet_filepath);
+  auto const footer_buffer = cudf::io::parquet::fetch_footer_to_host(*datasource);
+  auto reader =
+    std::make_unique<cudf::io::parquet::experimental::hybrid_scan_reader>(*footer_buffer, options);
+
+  auto const all_row_groups       = reader->all_row_groups(options);
+  auto const chunk_ranges         = reader->all_column_chunks_byte_ranges(all_row_groups, options);
+  auto [buffers, col_data, tasks] = cudf::io::parquet::fetch_byte_ranges_to_device_async(
+    *datasource, chunk_ranges, cudf::io::parquet::io_submission_policy::SERIALIZE, stream, mr);
+  tasks.get();
+
+  reader->setup_chunking_for_all_columns(0, 0, all_row_groups, col_data, options, stream, mr);
+
+  // Construct passes for filter columns after chunking is set up.
+  std::ignore = reader->construct_row_group_passes(
+    cudf::io::parquet::experimental::read_columns_mode::FILTER_COLUMNS, all_row_groups, 0, options);
+
+  // All column materialization now throws as the column selection is now stale
+  EXPECT_THROW(std::ignore = reader->materialize_all_columns_chunk(), cudf::logic_error);
+}
