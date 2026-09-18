@@ -1459,8 +1459,12 @@ TEST_F(HybridScanTest, MisusePassesThrows)
   auto const parquet_filepath = temp_env->get_temp_filepath("MisusePassesThrows.parquet");
   {
     auto full_table = cudf::concatenate(std::vector<cudf::table_view>(num_rg, chunk_table), stream);
+    cudf::io::table_input_metadata metadata(full_table->view());
+    metadata.column_metadata[0].set_name("col0");
+    metadata.column_metadata[1].set_name("col1");
     auto opts = cudf::io::parquet_writer_options::builder(cudf::io::sink_info{parquet_filepath},
                                                           full_table->view())
+                  .metadata(std::move(metadata))
                   .row_group_size_rows(rows_per_rg)
                   .max_page_fragment_size(rows_per_rg)
                   .build();
