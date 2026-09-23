@@ -166,7 +166,7 @@ class HybridScanReader:
     ) -> TableWithMetadata: ...
     def construct_row_group_passes(
         self,
-        read_columns_mode: ReadColumnsMode,
+        columns_mode: ReadColumnsMode,
         row_group_indices: list[int],
         pass_read_limit: int,
         options: ParquetReaderOptions,

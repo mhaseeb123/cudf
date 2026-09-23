@@ -6,11 +6,11 @@ from collections.abc import Sequence
 from rmm.pylibrmm.memory_resource import DeviceMemoryResource
 
 from pylibcudf.column import Column
+from pylibcudf.io.experimental.hybrid_scan import ReadColumnsMode
 from pylibcudf.io.parquet import ParquetReaderOptions
 from pylibcudf.io.parquet_metadata import FileMetaData
 from pylibcudf.io.text import ByteRangeInfo
 from pylibcudf.io.types import TableWithMetadata
-from pylibcudf.io.experimental.hybrid_scan import ReadColumnsMode
 from pylibcudf.span import Span
 from pylibcudf.utils import CudaStreamLike
 
@@ -57,7 +57,7 @@ class HybridScanMultiFile:
     ) -> TableWithMetadata: ...
     def construct_row_group_passes(
         self,
-        read_columns_mode: ReadColumnsMode,
+        columns_mode: ReadColumnsMode,
         row_group_indices: list[list[int]],
         pass_read_limit: int,
         options: ParquetReaderOptions,

@@ -634,7 +634,7 @@ public class HybridScanReader implements AutoCloseable {
    * selected columns respects the given limit. The returned array contains one inner array per
    * pass.
    *
-   * @param readColumnsMode columns used to estimate each pass
+   * @param columnsMode     columns used to estimate each pass
    * @param rowGroupIndices row groups to partition
    * @param passReadLimit   limit on the memory used by a single pass, or 0 for no limit.
    *                        Each returned pass can then be fed to a
@@ -643,14 +643,14 @@ public class HybridScanReader implements AutoCloseable {
    *                        {@code passReadLimit} argument.
    * @return an array of arrays of row group indices, one per pass
    */
-  public int[][] constructRowGroupPasses(ReadColumnsMode readColumnsMode,
+  public int[][] constructRowGroupPasses(ReadColumnsMode columnsMode,
                                          int[] rowGroupIndices,
                                          long passReadLimit) {
     assertNotClosed();
-    requireNonNullReadColumnsMode(readColumnsMode);
+    requireNonNullColumnsMode(columnsMode);
     requireNonNullRowGroups(rowGroupIndices);
     return constructRowGroupPasses(
-        cleaner.nativeHandle, readColumnsMode.nativeId, rowGroupIndices, passReadLimit);
+        cleaner.nativeHandle, columnsMode.nativeId, rowGroupIndices, passReadLimit);
   }
 
   // ----------------------------------------------------------------------
@@ -683,9 +683,9 @@ public class HybridScanReader implements AutoCloseable {
     }
   }
 
-  private static void requireNonNullReadColumnsMode(ReadColumnsMode readColumnsMode) {
-    if (readColumnsMode == null) {
-      throw new IllegalArgumentException("readColumnsMode must not be null");
+  private static void requireNonNullColumnsMode(ReadColumnsMode columnsMode) {
+    if (columnsMode == null) {
+      throw new IllegalArgumentException("columnsMode must not be null");
     }
   }
 
@@ -823,7 +823,7 @@ public class HybridScanReader implements AutoCloseable {
   private static native long[] materializeAllColumnsChunk(long handle);
   private static native boolean hasNextTableChunk(long handle);
   private static native int[][] constructRowGroupPasses(long handle,
-                                                         int readColumnsMode,
-                                                         int[] rowGroupIndices,
-                                                         long passReadLimit);
+                                                        int columnsMode,
+                                                        int[] rowGroupIndices,
+                                                        long passReadLimit);
 }

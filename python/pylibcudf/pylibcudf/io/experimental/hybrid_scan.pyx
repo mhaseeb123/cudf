@@ -1023,13 +1023,13 @@ cdef class HybridScanReader:
 
     def construct_row_group_passes(
         self,
-        cpp_read_columns_mode read_columns_mode,
+        cpp_read_columns_mode columns_mode,
         list row_group_indices: list[int],
         size_t pass_read_limit,
         ParquetReaderOptions options,
     ) -> list[list[int]]:
         """Partition row groups into passes such that the GPU memory required to
-         materialize a pass for selected columns is bounded by the specified limit.
+        materialize a pass for selected columns is bounded by the specified limit.
 
         Note that ``pass_read_limit`` is a hint, not an absolute limit. i.e. if
         a row group cannot fit within the limit, it will still constitute a valid
@@ -1037,7 +1037,7 @@ cdef class HybridScanReader:
 
         Parameters
         ----------
-        read_columns_mode : ReadColumnsMode
+        columns_mode : ReadColumnsMode
             Columns to consider for pass memory estimation.
         row_group_indices : list[int]
             Input row group indices
@@ -1062,7 +1062,7 @@ cdef class HybridScanReader:
         with nogil:
             passes = move(
                 self.c_obj.get()[0].construct_row_group_passes(
-                    read_columns_mode,
+                    columns_mode,
                     std_span[const_size_type](
                         indices_vec.data(), indices_vec.size()
                     ),

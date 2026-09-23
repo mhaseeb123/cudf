@@ -355,9 +355,9 @@ JNIEXPORT jboolean JNICALL Java_ai_rapids_cudf_HybridScanReader_hasNextTableChun
 
 namespace {
 
-exp_pq::read_columns_mode to_read_columns_mode(jint read_columns_mode)
+exp_pq::read_columns_mode to_read_columns_mode(jint columns_mode)
 {
-  switch (read_columns_mode) {
+  switch (columns_mode) {
     case 0: return exp_pq::read_columns_mode::FILTER_COLUMNS;
     case 1: return exp_pq::read_columns_mode::PAYLOAD_COLUMNS;
     case 2: return exp_pq::read_columns_mode::ALL_COLUMNS;
@@ -366,7 +366,7 @@ exp_pq::read_columns_mode to_read_columns_mode(jint read_columns_mode)
 }
 
 jobjectArray construct_row_group_passes(
-  JNIEnv* env, jlong handle, jint read_columns_mode, jintArray j_row_groups, jlong pass_read_limit)
+  JNIEnv* env, jlong handle, jint columns_mode, jintArray j_row_groups, jlong pass_read_limit)
 {
   JNI_NULL_CHECK(env, handle, "handle is null", nullptr);
   JNI_NULL_CHECK(env, j_row_groups, "row groups is null", nullptr);
@@ -376,9 +376,8 @@ jobjectArray construct_row_group_passes(
     auto const pass_limit = checked_size_t(env, pass_read_limit, "pass_read_limit");
     auto* wrapper         = reinterpret_cast<hybrid_scan_reader_wrapper*>(handle);
     auto holder           = make_row_group_span(env, j_row_groups);
-    auto const mode       = to_read_columns_mode(read_columns_mode);
     auto passes           = wrapper->reader->construct_row_group_passes(
-      mode, holder.span(), pass_limit, wrapper->options);
+      to_read_columns_mode(columns_mode), holder.span(), pass_limit, wrapper->options);
     jclass int_array_cls = env->FindClass("[I");
     if (int_array_cls == nullptr) { return nullptr; }
     auto outer = env->NewObjectArray(passes.size(), int_array_cls, nullptr);
@@ -400,11 +399,11 @@ JNIEXPORT jobjectArray JNICALL
 Java_ai_rapids_cudf_HybridScanReader_constructRowGroupPasses(JNIEnv* env,
                                                              jclass,
                                                              jlong handle,
-                                                             jint read_columns_mode,
+                                                             jint columns_mode,
                                                              jintArray j_row_groups,
                                                              jlong pass_read_limit)
 {
-  return construct_row_group_passes(env, handle, read_columns_mode, j_row_groups, pass_read_limit);
+  return construct_row_group_passes(env, handle, columns_mode, j_row_groups, pass_read_limit);
 }
 
 }  // extern "C"

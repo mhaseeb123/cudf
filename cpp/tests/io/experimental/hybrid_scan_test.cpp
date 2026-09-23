@@ -1443,6 +1443,81 @@ TEST_F(HybridScanTest, RowGroupPassesMatchesChunkedReader)
   });
 }
 
+TEST_F(HybridScanTest, RowGroupPassesUseSelectedColumns)
+{
+  auto constexpr num_rg      = 4;
+  auto constexpr rows_per_rg = 100;
+
+  auto values = cuda::counting_iterator(0);
+  cudf::test::fixed_width_column_wrapper<int32_t> filter_col(values, values + rows_per_rg);
+  auto payload_iter = cuda::constant_iterator(std::string(1'024, 'x'));
+  auto payload_col  = cudf::test::strings_column_wrapper(payload_iter, payload_iter + rows_per_rg);
+  auto chunk_table  = cudf::table_view{{filter_col, payload_col}};
+
+  auto const parquet_filepath =
+    temp_env->get_temp_filepath("RowGroupPassesUseSelectedColumns.parquet");
+  {
+    auto full_table = cudf::concatenate(std::vector<cudf::table_view>(num_rg, chunk_table));
+    cudf::io::table_input_metadata metadata(full_table->view());
+    metadata.column_metadata[0].set_name("filter_col");
+    metadata.column_metadata[1].set_name("payload_col");
+    auto const opts = cudf::io::parquet_writer_options::builder(
+                        cudf::io::sink_info{parquet_filepath}, full_table->view())
+                        .metadata(std::move(metadata))
+                        .row_group_size_rows(rows_per_rg)
+                        .max_page_fragment_size(rows_per_rg)
+                        .compression(cudf::io::compression_type::NONE)
+                        .dictionary_policy(cudf::io::dictionary_policy::NEVER)
+                        .build();
+    cudf::io::write_parquet(opts);
+  }
+
+  auto literal_value = cudf::numeric_scalar<int32_t>(0);
+  auto const literal = cudf::ast::literal(literal_value);
+  auto const col_ref = cudf::ast::column_name_reference("filter_col");
+  auto const filter_expr = cudf::ast::operation(cudf::ast::ast_operator::GREATER, col_ref, literal);
+  auto const options     = cudf::io::parquet_reader_options::builder().filter(filter_expr).build();
+
+  auto datasource          = cudf::io::datasource::create(parquet_filepath);
+  auto const footer_buffer = cudf::io::parquet::fetch_footer_to_host(*datasource);
+  auto reader =
+    std::make_unique<cudf::io::parquet::experimental::hybrid_scan_reader>(*footer_buffer, options);
+  auto const all_row_groups      = reader->all_row_groups(options);
+  auto constexpr pass_read_limit = 50'000;
+
+  auto const filter_passes = reader->construct_row_group_passes(
+    cudf::io::parquet::experimental::read_columns_mode::FILTER_COLUMNS,
+    all_row_groups,
+    pass_read_limit,
+    options);
+  auto const payload_passes = reader->construct_row_group_passes(
+    cudf::io::parquet::experimental::read_columns_mode::PAYLOAD_COLUMNS,
+    all_row_groups,
+    pass_read_limit,
+    options);
+  auto const all_passes = reader->construct_row_group_passes(
+    cudf::io::parquet::experimental::read_columns_mode::ALL_COLUMNS,
+    all_row_groups,
+    pass_read_limit,
+    options);
+
+  auto const expect_all_row_groups = [&](auto const& passes) {
+    auto flattened = std::vector<cudf::size_type>{};
+    for (auto const& pass : passes) {
+      ASSERT_FALSE(pass.empty());
+      flattened.insert(flattened.end(), pass.begin(), pass.end());
+    }
+    EXPECT_EQ(flattened, all_row_groups);
+  };
+  expect_all_row_groups(filter_passes);
+  expect_all_row_groups(payload_passes);
+  expect_all_row_groups(all_passes);
+
+  EXPECT_LT(filter_passes.size(), payload_passes.size());
+  EXPECT_LT(filter_passes.size(), all_passes.size());
+  EXPECT_LE(payload_passes.size(), all_passes.size());
+}
+
 TEST_F(HybridScanTest, MisusePassesThrows)
 {
   auto constexpr num_rg      = 4;
@@ -1494,7 +1569,7 @@ TEST_F(HybridScanTest, MisusePassesThrows)
 
   // Construct passes for filter columns after chunking is set up.
   std::ignore = reader->construct_row_group_passes(
-    cudf::io::parquet::experimental::read_columns_mode::FILTER_COLUMNS, all_row_groups, 0, options);
+    cudf::io::parquet::experimental::read_columns_mode::FILTER_COLUMNS, all_row_groups, 1, options);
 
   // All column materialization now throws as the column selection is now stale
   EXPECT_THROW(std::ignore = reader->materialize_all_columns_chunk(), cudf::logic_error);

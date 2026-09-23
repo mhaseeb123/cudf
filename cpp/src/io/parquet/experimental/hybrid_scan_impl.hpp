@@ -325,7 +325,7 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
   /**
    * @brief Partition per-source row groups into read passes for the specified column selection
    *
-   * @param read_columns_mode Column selection to consider for pass memory estimation
+   * @param columns_mode Columns to consider for pass memory estimation
    * @param row_group_indices Span of vectors of input row group indices, one per source
    * @param total_row_groups Total number of row groups across all sources
    * @param pass_read_limit Memory limit to read and decompress pass column chunks
@@ -334,7 +334,7 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
    * for single source input
    */
   [[nodiscard]] std::pair<std::vector<std::vector<cudf::size_type>>, std::vector<cudf::size_type>>
-  construct_row_group_passes(read_columns_mode read_columns_mode,
+  construct_row_group_passes(read_columns_mode columns_mode,
                              std::span<std::vector<size_type> const> row_group_indices,
                              std::size_t total_row_groups,
                              std::size_t pass_read_limit,
@@ -411,10 +411,10 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
   /**
    * @brief Select the columns to be read based on the read mode
    *
-   * @param read_columns_mode Read mode indicating if we are reading filter or payload columns
+   * @param columns_mode Columns to select
    * @param options Reader options
    */
-  void select_columns(read_columns_mode read_columns_mode, parquet_reader_options const& options);
+  void select_columns(read_columns_mode columns_mode, parquet_reader_options const& options);
 
   /**
    * @brief Get the byte ranges for the input column chunks
@@ -438,13 +438,13 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
   /**
    * @brief Helper to prepare column materialization
    *
-   * @param read_columns_mode Read mode indicating if we are reading filter or payload columns
+   * @param columns_mode Columns to materialize
    * @param num_sources Number of input sources
    * @param options Parquet reader options
    * @param stream CUDA stream used for device memory operations and kernel launches
    * @param mr Device memory resource used to allocate the device memory for the output columns
    */
-  void prepare_materialization(read_columns_mode read_columns_mode,
+  void prepare_materialization(read_columns_mode columns_mode,
                                std::size_t num_sources,
                                parquet_reader_options const& options,
                                cuda::stream_ref stream,
@@ -566,7 +566,7 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
    *
    * @tparam RowMaskView View type of the row mask column
    *
-   * @param[in] read_columns_mode Read mode indicating if we are reading filter or payload columns
+   * @param[in] columns_mode Columns to materialize
    * @param[in,out] out_metadata The output table metadata
    * @param[in,out] out_columns The columns for building the output table
    * @param[in,out] row_mask Boolean column indicating which rows need to be read after page-pruning
@@ -574,7 +574,7 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
    * @return The output table along with columns' metadata
    */
   template <typename RowMaskView>
-  table_with_metadata finalize_output(read_columns_mode read_columns_mode,
+  table_with_metadata finalize_output(read_columns_mode columns_mode,
                                       table_metadata& out_metadata,
                                       std::vector<std::unique_ptr<column>>& out_columns,
                                       RowMaskView row_mask);
@@ -586,14 +586,14 @@ class hybrid_scan_reader_impl : public parquet::detail::reader_impl {
    *
    * @tparam RowMaskView View type of the row mask column
    * @param mode Value indicating if the data sources are read all at once or chunk by chunk
-   * @param[in] read_columns_mode Read mode indicating if we are reading filter or payload columns
+   * @param[in] columns_mode Columns to materialize
    * @param[in,out] row_mask Boolean column indicating which rows need to be read after page-pruning
    *                         for filter columns, or after materialize step for payload columns
    * @return The output table along with columns' metadata
    */
   template <typename RowMaskView>
   table_with_metadata read_chunk_internal(read_mode mode,
-                                          read_columns_mode read_columns_mode,
+                                          read_columns_mode columns_mode,
                                           RowMaskView row_mask);
 
   /**

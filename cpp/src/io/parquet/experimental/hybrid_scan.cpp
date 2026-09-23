@@ -404,7 +404,7 @@ table_with_metadata hybrid_scan_reader::materialize_all_columns_chunk() const
 }
 
 std::vector<std::vector<cudf::size_type>> hybrid_scan_reader::construct_row_group_passes(
-  read_columns_mode read_columns_mode,
+  read_columns_mode columns_mode,
   std::span<cudf::size_type const> row_group_indices,
   std::size_t pass_read_limit,
   parquet_reader_options const& options) const
@@ -417,7 +417,7 @@ std::vector<std::vector<cudf::size_type>> hybrid_scan_reader::construct_row_grou
 
   return _impl
     ->construct_row_group_passes(
-      read_columns_mode, input_row_group_indices, total_row_groups, pass_read_limit, options)
+      columns_mode, input_row_group_indices, total_row_groups, pass_read_limit, options)
     .first;
 }
 

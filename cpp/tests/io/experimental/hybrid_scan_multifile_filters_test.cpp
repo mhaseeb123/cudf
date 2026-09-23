@@ -356,8 +356,8 @@ TEST_F(HybridScanMultifileFiltersTest, RowGroupPasses)
     auto invalid_rgs = all_rgs;
     invalid_rgs.pop_back();
     EXPECT_THROW(
-      static_cast<void>(reader->construct_row_group_passes(
-        cudf::io::parquet::experimental::read_columns_mode::ALL_COLUMNS, invalid_rgs, 0, options)),
+      std::ignore = reader->construct_row_group_passes(
+        cudf::io::parquet::experimental::read_columns_mode::ALL_COLUMNS, invalid_rgs, 0, options),
       std::invalid_argument);
   }
 
@@ -365,12 +365,12 @@ TEST_F(HybridScanMultifileFiltersTest, RowGroupPasses)
   {
     auto const empty_rgs = std::vector<std::vector<cudf::size_type>>(num_sources);
     EXPECT_THROW(
-      static_cast<void>(reader->construct_row_group_passes(
-        cudf::io::parquet::experimental::read_columns_mode::ALL_COLUMNS, empty_rgs, 0, options)),
+      std::ignore = reader->construct_row_group_passes(
+        cudf::io::parquet::experimental::read_columns_mode::ALL_COLUMNS, empty_rgs, 0, options),
       std::invalid_argument);
     EXPECT_THROW(
-      static_cast<void>(reader->construct_row_group_passes(
-        cudf::io::parquet::experimental::read_columns_mode::ALL_COLUMNS, empty_rgs, 1, options)),
+      std::ignore = reader->construct_row_group_passes(
+        cudf::io::parquet::experimental::read_columns_mode::ALL_COLUMNS, empty_rgs, 1, options),
       std::invalid_argument);
   }
 

@@ -363,7 +363,7 @@ cdef class HybridScanMultiFile:
 
     def construct_row_group_passes(
         self,
-        cpp_read_columns_mode read_columns_mode,
+        cpp_read_columns_mode columns_mode,
         list row_group_indices: list[list[int]],
         size_t pass_read_limit,
         ParquetReaderOptions options,
@@ -377,7 +377,7 @@ cdef class HybridScanMultiFile:
 
         Parameters
         ----------
-        read_columns_mode : ReadColumnsMode
+        columns_mode : ReadColumnsMode
             Columns to consider for pass memory estimation.
         row_group_indices : list[list[int]]
             Input row group indices, one list per source.
@@ -404,7 +404,7 @@ cdef class HybridScanMultiFile:
         with nogil:
             passes = move(
                 self.c_obj.get()[0].construct_row_group_passes(
-                    read_columns_mode,
+                    columns_mode,
                     std_span[const_vector_size_type](
                         <const_vector_size_type*>indices.data(), indices.size()
                     ),

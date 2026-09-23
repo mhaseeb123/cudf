@@ -789,11 +789,11 @@ class hybrid_scan_reader {
    *
    * Note that the `pass_read_limit` is a hint, not an absolute limit - if a single row group
    * cannot fit within the limit given, it will still constitute a pass. The compressed row group
-   * size is estimated over the columns selected by @p read_columns_mode.
+   * size is estimated over the columns selected by @p columns_mode.
    *
    * @throws std::invalid_argument if no row group indices in the input
    *
-   * @param read_columns_mode Columns to consider for pass memory estimation
+   * @param columns_mode Columns to consider for pass memory estimation
    * @param row_group_indices Input row group indices
    * @param pass_read_limit Memory limit to read and decompress pass column chunks, `0` if there is
    * no limit
@@ -801,7 +801,7 @@ class hybrid_scan_reader {
    * @return Vectors of row group indices, one per pass
    */
   [[nodiscard]] std::vector<std::vector<cudf::size_type>> construct_row_group_passes(
-    read_columns_mode read_columns_mode,
+    read_columns_mode columns_mode,
     std::span<cudf::size_type const> row_group_indices,
     std::size_t pass_read_limit,
     parquet_reader_options const& options) const;
