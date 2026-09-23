@@ -1472,9 +1472,9 @@ TEST_F(HybridScanTest, RowGroupPassesUseSelectedColumns)
     cudf::io::write_parquet(opts);
   }
 
-  auto literal_value = cudf::numeric_scalar<int32_t>(0);
-  auto const literal = cudf::ast::literal(literal_value);
-  auto const col_ref = cudf::ast::column_name_reference("filter_col");
+  auto literal_value     = cudf::numeric_scalar<int32_t>(0);
+  auto const literal     = cudf::ast::literal(literal_value);
+  auto const col_ref     = cudf::ast::column_name_reference("filter_col");
   auto const filter_expr = cudf::ast::operation(cudf::ast::ast_operator::GREATER, col_ref, literal);
   auto const options     = cudf::io::parquet_reader_options::builder().filter(filter_expr).build();
 

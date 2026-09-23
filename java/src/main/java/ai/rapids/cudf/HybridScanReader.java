@@ -329,13 +329,10 @@ public class HybridScanReader implements AutoCloseable {
   /**
    * @return byte ranges for the column chunks of <em>payload</em> columns.
    *
-   * <p>This result is order-dependent. If filter columns have already been processed on this
-   * reader (e.g. via {@link #filterColumnChunksByteRanges(int[])} or
-   * {@link #materializeFilterColumns(int[], DeviceMemoryBuffer[], boolean)}),
-   * the filter columns are excluded and only the payload columns are returned. If filter columns
-   * have not yet been processed, nothing is excluded and the ranges cover the full set of columns
-   * that would be read i.e. the columns projected via {@link ParquetOptions}, or all columns in
-   * the file when no projection was set.
+   * <p>If a filter is set, the columns referenced by the filter are always excluded, regardless
+   * of whether any filter column methods have been called on this reader. Without a filter,
+   * the ranges cover the full set of columns that would be read i.e. the columns projected via
+   * {@link ParquetOptions}, or all columns in the file when no projection was set.
    */
   public ByteRange[] payloadColumnChunksByteRanges(int[] rowGroupIndices) {
     assertNotClosed();
@@ -631,8 +628,9 @@ public class HybridScanReader implements AutoCloseable {
 
   /**
    * Partition the supplied row groups into passes whose estimated uncompressed size over the
-   * selected columns respects the given limit. The returned array contains one inner array per
-   * pass.
+   * selected columns is bounded by the given limit. The limit is a hint, not a strict memory
+   * bound: a pass always contains whole row groups, so a single row group larger than the limit
+   * still constitutes its own pass. The returned array contains one inner array per pass.
    *
    * @param columnsMode     columns used to estimate each pass
    * @param rowGroupIndices row groups to partition
