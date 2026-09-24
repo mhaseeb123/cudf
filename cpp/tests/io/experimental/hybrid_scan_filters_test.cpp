@@ -1353,8 +1353,14 @@ TEST_F(HybridScanFiltersTest, FilterRowGroupsWithDictionary)
 
     auto const options =
       cudf::io::parquet_reader_options::builder().filter(filter_expression).build();
+    reader->reset_column_selection();
     EXPECT_TRUE(
       reader->dictionary_pages_byte_ranges(reader->all_row_groups(options), options).empty());
+
+    constexpr size_t expected_row_groups = 4;
+    EXPECT_EQ(
+      filter_row_groups_with_dictionaries(datasource_ref, reader_ref, options, stream, mr).size(),
+      expected_row_groups);
   }
 
   {

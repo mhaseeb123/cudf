@@ -43,6 +43,22 @@ namespace {
   }
 }
 
+/**
+ * @brief Returns the operator that `NOT(col op val)` is equivalent to, if any
+ *
+ * @param op The comparison operator
+ * @param dtype The data type of the column being compared
+ * @return The complemented operator, or std::nullopt if the comparison cannot be complemented
+ */
+[[nodiscard]] std::optional<ast::ast_operator> negate_comparison(ast::ast_operator op,
+                                                                 cudf::data_type dtype)
+{
+  // A comparison cannot be complemented when the column may hold a `NaN`: IEEE-754 makes every
+  // ordered comparison with a NaN false, so `NOT(col < val)` is true where `col >= val` is not.
+  if (cudf::is_floating_point(dtype)) { return std::nullopt; }
+  return transform_operator<operator_transform::NEGATE>(op);
+}
+
 }  // namespace
 
 stats_columns_collector::stats_columns_collector(ast::expression const& expr,
@@ -82,11 +98,7 @@ simplified_expression_opt stats_columns_collector::simplify_negated_unary_op(
 simplified_expression_opt stats_columns_collector::simplify_negated_comparison(
   ast::ast_operator op, ast::column_reference const& col_ref, ast::literal const& literal)
 {
-  // A comparison cannot be complemented when the column may hold a `NaN`: IEEE-754 makes every
-  // ordered comparison with a NaN false, so `NOT(col < val)` is true where `col >= val` is not.
-  if (cudf::is_floating_point(_output_dtypes[col_ref.get_column_index()])) { return std::nullopt; }
-
-  auto const negated_op = transform_operator<operator_transform::NEGATE>(op);
+  auto const negated_op = negate_comparison(op, _output_dtypes[col_ref.get_column_index()]);
   if (not negated_op.has_value()) { return std::nullopt; }
   return simplify_comparison(*negated_op, col_ref, literal);
 }
@@ -211,11 +223,7 @@ simplified_expression_opt stats_expression_converter::simplify_negated_unary_op(
 simplified_expression_opt stats_expression_converter::simplify_negated_comparison(
   ast::ast_operator op, ast::column_reference const& col_ref, ast::literal const& literal)
 {
-  // A comparison cannot be complemented when the column may hold a `NaN`: IEEE-754 makes every
-  // ordered comparison with a NaN false, so `NOT(col < val)` is true where `col >= val` is not.
-  if (cudf::is_floating_point(_output_dtypes[col_ref.get_column_index()])) { return std::nullopt; }
-
-  auto const negated_op = transform_operator<operator_transform::NEGATE>(op);
+  auto const negated_op = negate_comparison(op, _output_dtypes[col_ref.get_column_index()]);
   if (not negated_op.has_value()) { return std::nullopt; }
   return simplify_comparison(*negated_op, col_ref, literal);
 }
