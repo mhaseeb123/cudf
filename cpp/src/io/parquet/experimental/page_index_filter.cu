@@ -115,6 +115,9 @@ struct page_stats_caster : public stats_caster_base {
           auto const num_pages_in_colchunk   = column_index.min_values.size();
           auto const page_offset_in_colchunk = col_chunk_page_offsets[page_offset_idx++];
 
+          CUDF_EXPECTS(column_index.max_values.size() == num_pages_in_colchunk,
+                       "Number of max values must match the number of pages in the column chunk",
+                       std::invalid_argument);
           CUDF_EXPECTS(column_index.null_pages.size() == num_pages_in_colchunk,
                        "Number of null page flags must match the number of pages in the column "
                        "chunk",
@@ -133,14 +136,18 @@ struct page_stats_caster : public stats_caster_base {
               auto const& min_value      = column_index.min_values[page_idx];
               auto const& max_value      = column_index.max_values[page_idx];
               auto const column_page_idx = page_offset_in_colchunk + page_idx;
-              // Translate binary data to Type then to <T>
-              min.set_index(column_page_idx, min_value, colchunk.meta_data.type, ts_scale);
-              max.set_index(column_page_idx, max_value, colchunk.meta_data.type, ts_scale);
               // Check if the page is completely null
               if (column_index.null_pages[page_idx]) {
+                min.set_index(column_page_idx, std::nullopt, colchunk.meta_data.type);
+                max.set_index(column_page_idx, std::nullopt, colchunk.meta_data.type);
                 all_null.val[column_page_idx] = true;
                 return;
               }
+
+              // Translate binary data to Type then to <T>
+              min.set_index(column_page_idx, min_value, colchunk.meta_data.type, ts_scale);
+              max.set_index(column_page_idx, max_value, colchunk.meta_data.type, ts_scale);
+
               // Check if the page doesn't have a null count
               if (not column_index.null_counts.has_value()) {
                 all_null.set_index(column_page_idx, std::nullopt, {});
