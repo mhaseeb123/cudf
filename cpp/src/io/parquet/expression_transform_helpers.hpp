@@ -113,6 +113,19 @@ template <operator_transform mode>
 [[nodiscard]] bool is_boolean_valued(ast::expression const& expr);
 
 /**
+ * @brief Whether a bloom filter or a dictionary page can be queried for an equality predicate
+ * between a column and a literal
+ *
+ * @throws cudf::logic_error if the literal's type differs from the column's
+ *
+ * @param column_type Output type of the column
+ * @param literal Literal compared against the column
+ * @return Whether the predicate can be queried
+ */
+[[nodiscard]] bool is_membership_queryable(cudf::data_type column_type,
+                                           ast::literal const& literal);
+
+/**
  * @brief Collects column names from the expression ignoring the `skip_names`
  */
 class names_from_expression : public ast::detail::expression_transformer {

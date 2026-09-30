@@ -13,6 +13,7 @@
 #include <cudf/ast/detail/operators.hpp>
 #include <cudf/ast/expressions.hpp>
 #include <cudf/detail/cuco_helpers.hpp>
+#include <cudf/detail/utilities/assert.cuh>
 #include <cudf/detail/utilities/cuda.cuh>
 #include <cudf/detail/utilities/grid_1d.cuh>
 #include <cudf/detail/utilities/integer_utils.hpp>
@@ -366,10 +367,10 @@ __device__ T decode_fixed_width_value(PageInfo const& page,
   // Placeholder for the decoded value
   auto decoded_value = T{};
 
-  // Check for decimal types
+  // Check for decimal types, which are dispatched as their integer storage type
   auto const is_decimal =
     chunk.logical_type.has_value() and chunk.logical_type.value().type == LogicalType::DECIMAL;
-  if (is_decimal and not cudf::is_fixed_point<T>()) {
+  if (is_decimal and not cudf::is_integral<T>()) {
     set_error(error, decode_error::INVALID_DATA_TYPE);
     return {};
   }
@@ -382,16 +383,17 @@ __device__ T decode_fixed_width_value(PageInfo const& page,
         set_error(error, decode_error::DATA_STREAM_OVERRUN);
         return {};
       }
-      // Check if the flba length is valid
-      if (flba_length != INT96_SIZE or not cuda::std::is_same_v<T, int64_t>) {
+      // INT96 values are decoded into 64-bit timestamps. INT96 has no type length in the schema, so
+      // `INT96_SIZE` is used to index the page data.
+      if constexpr (sizeof(T) == sizeof(int64_t) and
+                    (cudf::is_timestamp<T>() or cuda::std::is_same_v<T, int64_t>)) {
+        decode_int96timestamp(page_data + (value_idx * INT96_SIZE),
+                              chunk.ts_clock_rate,
+                              reinterpret_cast<int64_t*>(&decoded_value));
+      } else {
         set_error(error, decode_error::INVALID_DATA_TYPE);
         return {};
       }
-
-      // Decode the int96 value from the page data
-      decode_int96timestamp(page_data + (value_idx * flba_length),
-                            chunk.ts_clock_rate,
-                            reinterpret_cast<int64_t*>(&decoded_value));
       break;
     }
 
@@ -406,19 +408,23 @@ __device__ T decode_fixed_width_value(PageInfo const& page,
         set_error(error, decode_error::INVALID_DATA_TYPE);
         return {};
       }
-      // Decode the flba values as string view
-      auto const flba_value = cudf::string_view{
-        reinterpret_cast<char const*>(page_data) + value_idx * flba_length, flba_length};
-      // Copy the flba value including decimal128 (__int128) from the page data
-      cuda::std::memcpy(&decoded_value, flba_value.data(), flba_length);
-
-      // Handle signed integral types
-      if constexpr (cudf::is_integral<T>() and cudf::is_signed<T>()) {
-        // Shift the unscaled value up and back down to correctly represent negative numbers.
-        if (flba_length < sizeof(T)) {
-          decoded_value <<= (sizeof(T) - flba_length) * 8;
-          decoded_value >>= (sizeof(T) - flba_length) * 8;
+      // Only decimals are decoded from FIXED_LEN_BYTE_ARRAY into fixed width types
+      if constexpr (cudf::is_integral<T>()) {
+        // Decimals are big-endian two's complement, including decimal128 (__int128)
+        auto const flba_value = page_data + value_idx * flba_length;
+        for (auto i = 0; i < flba_length; ++i) {
+          decoded_value = static_cast<T>((decoded_value << 8) | flba_value[i]);
         }
+        // Shift the unscaled value up and back down to correctly represent negative numbers.
+        if constexpr (cudf::is_signed<T>()) {
+          if (flba_length < sizeof(T)) {
+            decoded_value <<= (sizeof(T) - flba_length) * 8;
+            decoded_value >>= (sizeof(T) - flba_length) * 8;
+          }
+        }
+      } else {
+        set_error(error, decode_error::INVALID_DATA_TYPE);
+        return {};
       }
       break;
     }
@@ -1289,19 +1295,14 @@ struct dictionary_caster {
     cuda::stream_ref stream,
     rmm::device_async_resource_ref mr)
   {
-    // Boolean, List, Struct, Dictionary types are not supported
+    // Booleans and compound types are not collected by `dictionary_literals_collector`
     if constexpr (not is_supported_dictionary_type<T>) {
-      CUDF_FAIL("Dictionaries do not support boolean or compound types");
+      CUDF_UNREACHABLE("Dictionaries cannot be queried for boolean or compound types");
     } else {
-      // Make sure all literals have the same type as the predicate column
+      // Unqueryable literals are not collected by `dictionary_literals_collector`
       std::for_each(literals.begin(), literals.end(), [&](auto const& literal) {
-        // Check if the literal has the same type as the predicate column
-        CUDF_EXPECTS(
-          dtype == literal->get_data_type() and
-            cudf::have_same_types(
-              cudf::column_view{dtype, 0, {}, {}, 0, 0, {}},
-              cudf::scalar_type_t<T>(T{}, false, stream, cudf::get_current_device_resource_ref())),
-          "Mismatched predicate column and literal types");
+        CUDF_EXPECTS(parquet::detail::is_membership_queryable(dtype, *literal),
+                     "Dictionaries cannot be queried for the predicate column and literal");
       });
 
       // If there are only a few literals, just evaluate expression while decoding dictionary data
@@ -1375,8 +1376,8 @@ class dictionary_expression_converter final : public parquet_expression_simplifi
     auto const literal_iter        = std::ranges::find_if(literal_indices, [&](auto idx) {
       return equality_literals[idx] == &literal and equality_operators[idx] == op;
     });
-    CUDF_EXPECTS(literal_iter != literal_indices.end(),
-                 "Dictionary expression converter encountered an unexpected literal");
+    // Skip dictionary probing for literals not collected by the dictionary literals collector
+    if (literal_iter == literal_indices.end()) { return std::nullopt; }
 
     auto const col_literal_offset =
       _col_literals_offsets[col_idx] + static_cast<cudf::size_type>(*literal_iter);
@@ -1458,9 +1459,6 @@ aggregate_reader_metadata::apply_dictionary_filter(
       // Skip if no equality literals for this column
       if (literals[input_col_idx].empty()) { return; }
 
-      // Skip if non-comparable (compound) type except string
-      if (cudf::is_compound(dtype) and dtype.id() != cudf::type_id::STRING) { return; }
-
       // Create a dictionary membership caster struct for the current column
       dictionary_caster const dictionary_col{chunks,
                                              pages,
@@ -1518,6 +1516,12 @@ simplified_expression_opt dictionary_literals_collector::simplify_comparison(
   if (op != ast_operator::EQUAL and op != ast_operator::NOT_EQUAL) { return std::nullopt; }
 
   auto const col_idx = col_ref.get_column_index();
+
+  // Do not collect literals that dictionaries cannot query
+  if (not parquet::detail::is_membership_queryable(_output_dtypes[col_idx], literal)) {
+    return std::nullopt;
+  }
+
   _literals[col_idx].emplace_back(const_cast<ast::literal*>(&literal));
   _operators[col_idx].emplace_back(op);
   return placeholder_expr();

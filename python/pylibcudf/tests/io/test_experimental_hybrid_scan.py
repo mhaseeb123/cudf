@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import decimal
 import io
 
 import pyarrow as pa
@@ -22,6 +23,57 @@ from pylibcudf.io.experimental import (
     ReadColumnsMode,
     UseDataPageMask,
 )
+
+
+def _footer_bytes(parquet_bytes: bytes) -> memoryview:
+    """Extract the footer bytes from a parquet file.
+
+    According to Parquet file format specification:
+    https://parquet.apache.org/docs/file-format/
+    """
+    PARQUET_FOOTER_SIZE_BYTES = 4  # Number of bytes encoding footer length
+    PARQUET_MAGIC_BYTES = 4  # Number of bytes for "PAR1" magic number
+    PARQUET_SUFFIX_BYTES = PARQUET_FOOTER_SIZE_BYTES + PARQUET_MAGIC_BYTES
+
+    parquet_mv = memoryview(parquet_bytes)
+    footer_size = int.from_bytes(
+        parquet_mv[-PARQUET_SUFFIX_BYTES:-PARQUET_MAGIC_BYTES],
+        byteorder="little",
+    )
+    footer_start = len(parquet_mv) - PARQUET_SUFFIX_BYTES - footer_size
+    footer_end = len(parquet_mv) - PARQUET_SUFFIX_BYTES
+    return parquet_mv[footer_start:footer_end]
+
+
+def _filter_row_groups_with_dictionary_pages(
+    reader: HybridScanReader,
+    options: plc.io.parquet.ParquetReaderOptions,
+    parquet_bytes: bytes,
+    filter_expression: Operation,
+) -> list[int]:
+    """Row groups that survive dictionary page filtering with `filter_expression`."""
+    reader.reset_column_selection()
+    options.set_filter(filter_expression)
+    all_row_groups = reader.all_row_groups(options)
+    dictionary_ranges = reader.dictionary_pages_byte_ranges(
+        all_row_groups, options
+    )
+    # the caller is responsible for keeping the source bytes alive until
+    # synchronize_stream() below runs.
+    # See https://github.com/rapidsai/rmm/issues/2521
+    dict_page_bytes = [
+        parquet_bytes[r.offset : r.offset + r.size] for r in dictionary_ranges
+    ]
+    dictionary_data = [
+        plc.gpumemoryview(
+            rmm.DeviceBuffer.to_device(b, plc.utils._get_stream())
+        )
+        for b in dict_page_bytes
+    ]
+    synchronize_stream()
+    return reader.filter_row_groups_with_dictionary_pages(
+        dictionary_data, all_row_groups, options
+    )
 
 
 @pytest.fixture(scope="module")
@@ -92,24 +144,9 @@ def simple_hybrid_scan_reader(
     Note: This is function-scoped (not module-scoped) because it depends on
     the function-scoped simple_parquet_options fixture.
     """
-    # Extract footer bytes from the parquet file
-    # According to Parquet file format specification:
-    # https://parquet.apache.org/docs/file-format/
-    PARQUET_FOOTER_SIZE_BYTES = 4  # Number of bytes encoding footer length
-    PARQUET_MAGIC_BYTES = 4  # Number of bytes for "PAR1" magic number
-    PARQUET_SUFFIX_BYTES = PARQUET_FOOTER_SIZE_BYTES + PARQUET_MAGIC_BYTES
-
-    simple_parquet_mv = memoryview(simple_parquet_bytes)
-
-    footer_size = int.from_bytes(
-        simple_parquet_mv[-PARQUET_SUFFIX_BYTES:-PARQUET_MAGIC_BYTES],
-        byteorder="little",
+    return HybridScanReader(
+        _footer_bytes(simple_parquet_bytes), simple_parquet_options
     )
-    footer_start = len(simple_parquet_mv) - PARQUET_SUFFIX_BYTES - footer_size
-    footer_end = len(simple_parquet_mv) - PARQUET_SUFFIX_BYTES
-    footer_mv = simple_parquet_mv[footer_start:footer_end]
-
-    return HybridScanReader(footer_mv, simple_parquet_options)
 
 
 def test_hybrid_scan_reader_basic(
@@ -947,33 +984,67 @@ def test_hybrid_scan_filter_row_groups_with_dictionary_pages_negation(
     reader = simple_hybrid_scan_reader
 
     def prune(filter_expression: Operation) -> list[int]:
-        reader.reset_column_selection()
-        simple_parquet_options.set_filter(filter_expression)
-        all_row_groups = reader.all_row_groups(simple_parquet_options)
-        dictionary_ranges = reader.dictionary_pages_byte_ranges(
-            all_row_groups, simple_parquet_options
-        )
-        # the caller is responsible for keeping the source bytes alive until
-        # synchronize_stream() below runs.
-        # See https://github.com/rapidsai/rmm/issues/2521
-        dict_page_bytes = [
-            simple_parquet_bytes[r.offset : r.offset + r.size]
-            for r in dictionary_ranges
-        ]
-        dictionary_data = [
-            plc.gpumemoryview(
-                rmm.DeviceBuffer.to_device(b, plc.utils._get_stream())
-            )
-            for b in dict_page_bytes
-        ]
-        synchronize_stream()
-        return reader.filter_row_groups_with_dictionary_pages(
-            dictionary_data, all_row_groups, simple_parquet_options
+        return _filter_row_groups_with_dictionary_pages(
+            reader,
+            simple_parquet_options,
+            simple_parquet_bytes,
+            filter_expression,
         )
 
     inner = Operation(negated, col1, needle)
     assert prune(Operation(ASTOperator.NOT, inner)) == expected
     assert prune(Operation(unnegated, col1, needle)) == expected
+
+
+@pytest.mark.parametrize(
+    "arrow_type,literal_type",
+    [
+        (pa.decimal128(9, 2), pa.decimal32(9, 2)),  # 4 byte FLBA
+        (pa.decimal128(12, 2), pa.decimal64(12, 2)),  # 6 byte FLBA
+    ],
+)
+def test_hybrid_scan_filter_row_groups_with_dictionary_pages_short_flba_decimals(
+    arrow_type, literal_type
+) -> None:
+    """Decimals in FIXED_LEN_BYTE_ARRAY shorter than their cudf storage type
+    (pyarrow's default) are big-endian and must be sign-extended.
+    """
+    # Negative values. Row group 0 holds -0.55 and row group 1 does not.
+    evens = [
+        decimal.Decimal((i % 50) * 2 - 60).scaleb(-2) for i in range(1000)
+    ]
+    with_odd = [
+        decimal.Decimal(-55).scaleb(-2) if i % 50 == 1 else v
+        for i, v in enumerate(evens)
+    ]
+    buf = io.BytesIO()
+    pq.write_table(
+        pa.table({"c": pa.array(with_odd + evens, arrow_type)}),
+        buf,
+        row_group_size=len(evens),
+        use_dictionary=True,
+    )
+    parquet_bytes = buf.getvalue()
+    options = plc.io.parquet.ParquetReaderOptions.builder(
+        plc.io.SourceInfo([io.BytesIO(parquet_bytes)])
+    ).build()
+    reader = HybridScanReader(_footer_bytes(parquet_bytes), options)
+
+    for value, expected in [(-55, [0]), (-53, [])]:
+        literal = pa.array([decimal.Decimal(value).scaleb(-2)], literal_type)[
+            0
+        ]
+        filter_expression = Operation(
+            ASTOperator.EQUAL,
+            ColumnNameReference("c"),
+            Literal(plc.Scalar.from_arrow(literal)),
+        )
+        assert (
+            _filter_row_groups_with_dictionary_pages(
+                reader, options, parquet_bytes, filter_expression
+            )
+            == expected
+        )
 
 
 def test_hybrid_scan_metadata_with_page_index(
