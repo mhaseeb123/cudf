@@ -2368,7 +2368,7 @@ aggregate_reader_metadata::select_columns(
 }
 
 std::vector<Type> aggregate_reader_metadata::get_parquet_types(
-  host_span<int const> column_schemas) const
+  std::span<int const> column_schemas) const
 {
   std::vector<Type> parquet_types(column_schemas.size());
   std::ranges::transform(column_schemas, parquet_types.begin(), [&](auto const schema_idx) {
