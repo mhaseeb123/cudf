@@ -415,8 +415,8 @@ class bloom_filter_expression_converter final : public parquet_expression_simpli
     auto const literal_iter =
       std::find(equality_literals.cbegin(), equality_literals.cend(), &literal);
 
-    CUDF_EXPECTS(literal_iter != equality_literals.cend(),
-                 "Bloom filter expression converter encountered an unexpected literal");
+    // Supported comparisons in discarded OR branches were not collected.
+    if (literal_iter == equality_literals.cend()) { return std::nullopt; }
 
     auto const col_literal_offset =
       _col_literals_offsets[col_idx] +
@@ -634,6 +634,7 @@ equality_literals_collector::equality_literals_collector(
     _output_column_schemas.empty() or _output_column_schemas.size() == output_dtypes.size(),
     "output_column_schemas must have the same size as output_dtypes when provided");
   _literals.resize(static_cast<size_type>(output_dtypes.size()));
+  _operators.resize(static_cast<size_type>(output_dtypes.size()));
 }
 
 equality_literals_collector::equality_literals_collector(
@@ -648,7 +649,31 @@ equality_literals_collector::equality_literals_collector(
 
 void equality_literals_collector::collect(ast::expression const& expr)
 {
-  _can_filter = simplify_expr(expr).has_value();
+  auto const simplified_expr = simplify_expr(expr);
+  _can_filter                = simplified_expr.has_value();
+  if (not _can_filter) { return; }
+
+  // Walk the simplified tree and collect literals and operators
+  collect_surviving_predicates(simplified_expr.value().get());
+}
+
+void equality_literals_collector::collect_surviving_predicates(
+  ast::expression const& simplified_expr)
+{
+  auto const& operation = dynamic_cast<ast::operation const&>(simplified_expr);
+  auto const op         = operation.get_operator();
+  auto const& operands  = operation.get_operands();
+  if (op == ast::ast_operator::NULL_LOGICAL_AND or op == ast::ast_operator::NULL_LOGICAL_OR) {
+    for (auto const& operand : operands) {
+      collect_surviving_predicates(operand.get());
+    }
+    return;
+  }
+  auto const col_idx =
+    dynamic_cast<ast::column_reference const&>(operands.front().get()).get_column_index();
+  _literals[col_idx].emplace_back(
+    const_cast<ast::literal*>(&dynamic_cast<ast::literal const&>(operands.back().get())));
+  _operators[col_idx].emplace_back(op);
 }
 
 bool equality_literals_collector::can_filter() const { return _can_filter; }
@@ -664,8 +689,7 @@ simplified_expression_opt equality_literals_collector::simplify_comparison(
     return std::nullopt;
   }
 
-  _literals[col_idx].emplace_back(const_cast<ast::literal*>(&literal));
-  return placeholder_expr();
+  return _tree.push(ast::operation{op, col_ref, literal});
 }
 
 std::vector<std::vector<ast::literal*>> equality_literals_collector::get_literals() &&

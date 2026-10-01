@@ -1424,8 +1424,8 @@ class dictionary_expression_converter final : public parquet_expression_simplifi
       return equality_literals[idx] == &literal and equality_operators[idx] == op;
     });
 
-    CUDF_EXPECTS(literal_iter != literal_indices.end(),
-                 "Dictionary expression converter encountered an unexpected literal");
+    // Supported comparisons in discarded OR branches were not collected.
+    if (literal_iter == literal_indices.end()) { return std::nullopt; }
 
     auto const col_literal_offset =
       _col_literals_offsets[col_idx] + static_cast<cudf::size_type>(*literal_iter);
@@ -1545,7 +1545,6 @@ dictionary_literals_collector::dictionary_literals_collector(
   ast::expression const& expr, std::span<cudf::data_type const> output_dtypes)
   : equality_literals_collector{output_dtypes, {}, {}}
 {
-  _operators.resize(static_cast<cudf::size_type>(output_dtypes.size()));
   collect(expr);
 }
 
@@ -1557,9 +1556,7 @@ simplified_expression_opt dictionary_literals_collector::simplify_comparison(
   // Do not collect literals that dictionary pages cannot be queried for
   if (not is_dictionary_filterable(op, _output_dtypes[col_idx], literal)) { return std::nullopt; }
 
-  _literals[col_idx].emplace_back(const_cast<ast::literal*>(&literal));
-  _operators[col_idx].emplace_back(op);
-  return placeholder_expr();
+  return _tree.push(ast::operation{op, col_ref, literal});
 }
 
 std::pair<std::vector<std::vector<ast::literal*>>, std::vector<std::vector<ast::ast_operator>>>
