@@ -41,6 +41,7 @@ namespace cudf::io::parquet::experimental::detail {
 using parquet::detail::chunk_page_info;
 using parquet::detail::ColumnChunkDesc;
 using parquet::detail::decode_big_endian_decimal;
+using parquet::detail::decode_byte_array_decimal;
 using parquet::detail::decode_error;
 using parquet::detail::PageInfo;
 
@@ -346,6 +347,7 @@ CUDF_KERNEL void query_dictionaries(cudf::device_span<T> decoded_data,
  * @param chunk Column chunk descriptor
  * @param value_idx Index of the value to decode from page data buffer
  * @param physical_type Parquet physical type of the column
+ * @param byte_array_offset Offset of the next value in a BYTE_ARRAY page data buffer
  * @param error Pointer to the kernel error code
  * @return Decoded value
  */
@@ -354,6 +356,7 @@ __device__ T decode_fixed_width_value(PageInfo const& page,
                                       ColumnChunkDesc const& chunk,
                                       int32_t value_idx,
                                       parquet::Type physical_type,
+                                      int32_t& byte_array_offset,
                                       kernel_error::pointer error)
 {
   // Page data pointer
@@ -414,6 +417,22 @@ __device__ T decode_fixed_width_value(PageInfo const& page,
       if constexpr (cudf::is_integral<T>()) {
         decoded_value =
           decode_big_endian_decimal<T>(page_data + value_idx * flba_length, flba_length);
+      } else {
+        set_error(error, decode_error::INVALID_DATA_TYPE);
+        return {};
+      }
+      break;
+    }
+    case parquet::Type::BYTE_ARRAY: {
+      // Only decimals are decoded from BYTE_ARRAY into fixed width types
+      if constexpr (cudf::is_integral<T>()) {
+        auto const value =
+          decode_byte_array_decimal<T>(page_data, page.uncompressed_page_size, byte_array_offset);
+        if (not value.has_value()) {
+          set_error(error, decode_error::DATA_STREAM_OVERRUN);
+          return {};
+        }
+        decoded_value = value.value();
       } else {
         set_error(error, decode_error::INVALID_DATA_TYPE);
         return {};
@@ -720,15 +739,24 @@ CUDF_KERNEL void __launch_bounds__(DECODE_BLOCK_SIZE)
                                            storage_ref};
   auto set_insert_ref = hash_set_ref.rebind_operators(cuco::insert);
 
+  // Check for BYTE_ARRAY decimals
+  auto const is_byte_array = physical_type == parquet::Type::BYTE_ARRAY;
+
+  // Only one thread decodes BYTE_ARRAY decimals
+  if (is_byte_array and group.thread_rank() != 0) { return; }
+
+  // Initial byte array decimal offset
+  auto byte_array_offset = int32_t{0};
+
   // Decode values from the current dictionary page
   for (auto value_idx = group.thread_rank(); value_idx < page.num_input_values;
-       value_idx += group.num_threads()) {
+       value_idx += is_byte_array ? 1 : group.num_threads()) {
     // Key (decoded value's global index) to insert into the cuco hash set
     auto const insert_key = static_cast<key_type>(value_offset + value_idx);
 
     // Decode the value from the page data
     decoded_data[insert_key] =
-      decode_fixed_width_value<T>(page, chunk, value_idx, physical_type, error);
+      decode_fixed_width_value<T>(page, chunk, value_idx, physical_type, byte_array_offset, error);
 
     // Return early if an error has been set
     if (is_error_set(error)) { return; }
@@ -908,11 +936,19 @@ CUDF_KERNEL void __launch_bounds__(DECODE_BLOCK_SIZE)
 
   group.sync();
 
+  // Check for BYTE_ARRAY decimals
+  auto const is_byte_array = physical_type == parquet::Type::BYTE_ARRAY;
+  // Only one thread decodes BYTE_ARRAY decimals
+  if (is_byte_array and group.thread_rank() != 0) { return; }
+  // Initial byte array decimal offset
+  auto byte_array_offset = int32_t{0};
+
   // Decode values from the current dictionary page with the current thread block
   for (auto value_idx = group.thread_rank(); value_idx < page.num_input_values;
-       value_idx += group.num_threads()) {
+       value_idx += is_byte_array ? 1 : group.num_threads()) {
     // Decode the value from the page data
-    auto decoded_value = decode_fixed_width_value<T>(page, chunk, value_idx, physical_type, error);
+    auto const decoded_value =
+      decode_fixed_width_value<T>(page, chunk, value_idx, physical_type, byte_array_offset, error);
 
     // Return early if an error has been set
     if (is_error_set(error)) { return; }
@@ -1292,6 +1328,11 @@ struct dictionary_caster {
     if constexpr (not is_supported_dictionary_type<T>) {
       CUDF_UNREACHABLE("Dictionaries cannot be queried for boolean or compound types");
     } else {
+      // Only decimals are decoded from BYTE_ARRAY into fixed width types
+      CUDF_EXPECTS((physical_type != parquet::Type::BYTE_ARRAY or
+                    cuda::std::is_same_v<T, cudf::string_view> or cudf::is_fixed_point(dtype)),
+                   "Dictionaries of BYTE_ARRAY columns can only be decoded as strings or decimals");
+
       // If there are only a few literals, just evaluate expression while decoding dictionary data
       if (literals.size() <= MAX_INLINE_LITERALS) {
         return evaluate_few_literals<T>(literals, operators, stream, mr);

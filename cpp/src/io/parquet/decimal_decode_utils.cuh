@@ -12,6 +12,7 @@
 #include <cuda/std/bit>
 #include <cuda/std/cstdint>
 #include <cuda/std/cstring>
+#include <cuda/std/optional>
 
 namespace cudf::io::parquet::detail {
 
@@ -49,6 +50,35 @@ template <typename T>
     }
   }
   return cuda::std::byteswap(big_endian);
+}
+
+/**
+ * @brief Decode the next decimal from a PLAIN encoded BYTE_ARRAY buffer
+ *
+ * BYTE_ARRAY values are prefixed with their 4 byte little-endian length, so they must be decoded in
+ * order, advancing `offset` past each value.
+ *
+ * @tparam T Integer storage type of the decimal column
+ * @param data Pointer to the start of the buffer
+ * @param size Size of the buffer in bytes
+ * @param offset Offset of the value's length in the buffer, advanced past the value
+ * @return Decoded unscaled value, or `cuda::std::nullopt` if the value overruns the buffer
+ */
+template <typename T>
+[[nodiscard]] CUDF_HOST_DEVICE inline cuda::std::optional<T> decode_byte_array_decimal(
+  uint8_t const* data, int32_t size, int32_t& offset)
+{
+  uint32_t length;
+  if (offset < 0 or size - offset < static_cast<int32_t>(sizeof(length))) {
+    return cuda::std::nullopt;
+  }
+  cuda::std::memcpy(&length, data + offset, sizeof(length));
+  offset += sizeof(length);
+  if (length > static_cast<uint32_t>(size - offset)) { return cuda::std::nullopt; }
+
+  auto const value = decode_big_endian_decimal<T>(data + offset, static_cast<int32_t>(length));
+  offset += static_cast<int32_t>(length);
+  return value;
 }
 
 }  // namespace cudf::io::parquet::detail

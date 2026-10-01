@@ -8,10 +8,13 @@
 
 #include <cudf_test/base_fixture.hpp>
 #include <cudf_test/table_utilities.hpp>
+#include <cudf_test/type_lists.hpp>
 
+#include <cudf/io/datasource.hpp>
 #include <cudf/io/experimental/hybrid_scan.hpp>
 #include <cudf/io/parquet.hpp>
 #include <cudf/io/parquet_io_utils.hpp>
+#include <cudf/io/parquet_metadata.hpp>
 #include <cudf/io/text/byte_range_info.hpp>
 #include <cudf/stream_compaction.hpp>
 #include <cudf/table/table_view.hpp>
@@ -24,6 +27,7 @@
 #include <src/io/parquet/parquet_gpu.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1949,17 +1953,17 @@ TEST_F(HybridScanFiltersTest, FilterRowGroupsWithDictionaryInt96AndBool)
   // bool column. Row group 0 holds 10 timestamps at multiples of `step`, and row group 1 the same
   // values shifted by one microsecond, so only the dictionaries can tell them apart. The writer
   // stores INT96 with microsecond precision, so all values are whole microseconds.
-  auto constexpr num_rows_per_row_group = 5000;
-  auto constexpr step                   = int64_t{1'000'007'000};
-  auto const timestamps = cudf::detail::make_counting_transform_iterator(0, [](auto i) {
-    auto const row_group = i / num_rows_per_row_group;
+  auto constexpr rows_per_row_group = 5000;
+  auto constexpr step               = int64_t{1'000'007'000};
+  auto const timestamps             = cudf::detail::make_counting_transform_iterator(0, [](auto i) {
+    auto const row_group = i / rows_per_row_group;
     return cudf::timestamp_ns{cudf::duration_ns{(i % 10 - 5) * step + row_group * 1000}};
   });
-  auto const ts_col     = cudf::test::fixed_width_column_wrapper<cudf::timestamp_ns>(
-    timestamps, timestamps + 2 * num_rows_per_row_group);
+  auto const ts_col                 = cudf::test::fixed_width_column_wrapper<cudf::timestamp_ns>(
+    timestamps, timestamps + 2 * rows_per_row_group);
   auto const trues = cuda::make_constant_iterator(true);
   auto const bool_col =
-    cudf::test::fixed_width_column_wrapper<bool>(trues, trues + 2 * num_rows_per_row_group);
+    cudf::test::fixed_width_column_wrapper<bool>(trues, trues + 2 * rows_per_row_group);
   auto const table = cudf::table_view{{ts_col, bool_col}};
 
   auto table_metadata = cudf::io::table_input_metadata{table};
@@ -1970,7 +1974,7 @@ TEST_F(HybridScanFiltersTest, FilterRowGroupsWithDictionaryInt96AndBool)
   auto const write_opts =
     cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buffer}, table)
       .metadata(std::move(table_metadata))
-      .row_group_size_rows(num_rows_per_row_group)
+      .row_group_size_rows(rows_per_row_group)
       .dictionary_policy(cudf::io::dictionary_policy::ALWAYS)
       .int96_timestamps(true)
       .build();
@@ -2140,18 +2144,17 @@ class DictionaryFilterGapTest : public HybridScanFiltersTest,
 
 TEST_P(DictionaryFilterGapTest, FilterRowGroupsWithMissingDictPages)
 {
-  auto const compression                = GetParam();
-  auto constexpr num_rows_per_row_group = 20'000;
+  auto const compression            = GetParam();
+  auto constexpr rows_per_row_group = 20'000;
   // RG 0 holds a single distinct value so it is dict encoded
   // RG 1 holds all distinct values so it falls back
   auto const strings = cudf::detail::make_counting_transform_iterator(0, [](auto const i) {
-    return i < num_rows_per_row_group ? std::string{"dict_value"}
-                                      : "plain_value_" + std::to_string(i - num_rows_per_row_group);
+    return i < rows_per_row_group ? std::string{"dict_value"}
+                                  : "plain_value_" + std::to_string(i - rows_per_row_group);
   });
 
-  auto const column =
-    cudf::test::strings_column_wrapper(strings, strings + 2 * num_rows_per_row_group);
-  auto const table = cudf::table_view{{column}};
+  auto const column = cudf::test::strings_column_wrapper(strings, strings + 2 * rows_per_row_group);
+  auto const table  = cudf::table_view{{column}};
 
   auto table_metadata = cudf::io::table_input_metadata{table};
   table_metadata.column_metadata[0].set_name("col0");
@@ -2160,7 +2163,7 @@ TEST_P(DictionaryFilterGapTest, FilterRowGroupsWithMissingDictPages)
   auto const write_opts =
     cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, table)
       .metadata(std::move(table_metadata))
-      .row_group_size_rows(num_rows_per_row_group)
+      .row_group_size_rows(rows_per_row_group)
       .dictionary_policy(cudf::io::dictionary_policy::ADAPTIVE)
       .max_dictionary_size(1024)
       .stats_level(cudf::io::statistics_freq::STATISTICS_COLUMN)
@@ -2304,3 +2307,90 @@ INSTANTIATE_TEST_SUITE_P(Compression,
                          DictionaryFilterGapTest,
                          ::testing::Values(cudf::io::compression_type::NONE,
                                            cudf::io::compression_type::ZSTD));
+
+template <typename T>
+struct ByteArrayDecimalDictTest : public HybridScanFiltersTest {};
+
+TYPED_TEST_SUITE(ByteArrayDecimalDictTest, cudf::test::FixedPointTypes);
+
+TYPED_TEST(ByteArrayDecimalDictTest, FilterRowGroups)
+{
+  using T = TypeParam;
+
+  // Minimal big-endian BYTE_ARRAY decimals; row group 1 holds row group 0's 10 values plus one
+  auto constexpr rows_per_row_group = 5000;
+  auto constexpr step               = int64_t{70'001};
+  auto constexpr scale              = 2;
+  auto constexpr precision          = cuda::std::is_same_v<T, numeric::decimal32>   ? 9
+                                      : cuda::std::is_same_v<T, numeric::decimal64> ? 18
+                                                                                    : 38;
+
+  auto stream = cudf::get_default_stream();
+  auto mr     = cudf::get_current_device_resource_ref();
+
+  // Write the decimals as a binary column, since no writer produces BYTE_ARRAY decimals
+  auto const filepath = temp_env->get_temp_filepath("FilterByteArrayDecimals.parquet");
+  {
+    auto const byte_array_decimals =
+      cudf::detail::make_counting_transform_iterator(0, [](int64_t i) {
+        auto const value = (i % 10 - 5) * step + i / rows_per_row_group;
+        // Fewest bytes that hold the magnitude bits plus a sign bit
+        auto const magnitude = static_cast<uint64_t>(value < 0 ? ~value : value);
+        auto const num_bytes = std::bit_width(magnitude) / 8 + 1;
+        std::string bytes(num_bytes, '\0');
+        for (auto b = 0; b < num_bytes; ++b) {
+          bytes[num_bytes - 1 - b] = static_cast<char>(value >> (8 * b));
+        }
+        return bytes;
+      });
+
+    auto const col = cudf::test::strings_column_wrapper(
+      byte_array_decimals, byte_array_decimals + 2 * rows_per_row_group);
+    auto const table = cudf::table_view{{col}};
+
+    auto metadata = cudf::io::table_input_metadata{table};
+    metadata.column_metadata[0].set_name("dec").set_output_as_binary(true);
+
+    cudf::io::write_parquet(
+      cudf::io::parquet_writer_options::builder(cudf::io::sink_info{filepath}, table)
+        .metadata(std::move(metadata))
+        .row_group_size_rows(rows_per_row_group)
+        .dictionary_policy(cudf::io::dictionary_policy::ALWAYS)
+        .build(),
+      stream);
+
+    stream.sync();
+  }
+
+  // Annotate the binary column as a decimal in file metadata
+  auto const datasources   = cudf::io::make_datasources(cudf::io::source_info{filepath});
+  auto metadata            = cudf::io::read_parquet_footers(datasources).front();
+  auto& schema             = metadata.schema[1];
+  schema.converted_type    = cudf::io::parquet::ConvertedType::DECIMAL;
+  schema.decimal_scale     = scale;
+  schema.decimal_precision = precision;
+  schema.logical_type      = cudf::io::parquet::LogicalType{
+    cudf::io::parquet::DecimalType{.scale = scale, .precision = precision}};
+
+  // Create the reader with annotated footer
+  auto const reader = std::make_unique<cudf::io::parquet::experimental::hybrid_scan_reader>(
+    metadata, cudf::io::parquet_reader_options::builder().build());
+
+  auto const col_ref = cudf::ast::column_name_reference("dec");
+
+  for (auto const& [value, expected_row_groups] :
+       {std::pair{-3 * step, std::vector<cudf::size_type>{0}},
+        std::pair{-3 * step + 1, std::vector<cudf::size_type>{1}},
+        std::pair{-3 * step + 2, std::vector<cudf::size_type>{}}}) {
+    auto literal_value = cudf::fixed_point_scalar<T>(
+      static_cast<typename T::rep>(value), numeric::scale_type{-scale}, true, stream);
+    auto const literal = cudf::ast::literal(literal_value);
+    auto const filter_expression =
+      cudf::ast::operation(cudf::ast::ast_operator::EQUAL, col_ref, literal);
+    auto const options =
+      cudf::io::parquet_reader_options::builder().filter(filter_expression).build();
+    EXPECT_EQ(
+      filter_row_groups_with_dictionaries(*datasources.front(), *reader, options, stream, mr),
+      expected_row_groups);
+  }
+}

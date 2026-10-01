@@ -62,7 +62,7 @@ def _filter_row_groups_with_dictionary_pages(
     # synchronize_stream() below runs.
     # See https://github.com/rapidsai/rmm/issues/2521
     dict_page_bytes = [
-        parquet_bytes[r.offset : r.offset + r.size] for r in dictionary_ranges
+        parquet_bytes[r.offset: r.offset + r.size] for r in dictionary_ranges
     ]
     dictionary_data = [
         plc.gpumemoryview(
@@ -384,7 +384,7 @@ def test_hybrid_scan_materialize_columns(
     filter_data = [
         plc.gpumemoryview(
             rmm.DeviceBuffer.to_device(
-                memoryview(simple_parquet_bytes)[r.offset : r.offset + r.size],
+                memoryview(simple_parquet_bytes)[r.offset: r.offset + r.size],
                 plc.utils._get_stream(stream),
             )
         )
@@ -419,7 +419,7 @@ def test_hybrid_scan_materialize_columns(
     payload_data = [
         plc.gpumemoryview(
             rmm.DeviceBuffer.to_device(
-                memoryview(simple_parquet_bytes)[r.offset : r.offset + r.size],
+                memoryview(simple_parquet_bytes)[r.offset: r.offset + r.size],
                 plc.utils._get_stream(stream),
             )
         )
@@ -487,7 +487,7 @@ def test_hybrid_scan_payload_page_mask_without_page_index(
     # synchronize_stream() is called below.
     # See https://github.com/rapidsai/rmm/issues/2521
     payload_ranges = [
-        simple_parquet_bytes[r.offset : r.offset + r.size]
+        simple_parquet_bytes[r.offset: r.offset + r.size]
         for r in reader.payload_column_chunks_byte_ranges(
             row_groups, simple_parquet_options
         )
@@ -585,7 +585,7 @@ def test_hybrid_scan_single_step_materialize(
     all_columns_data = [
         plc.gpumemoryview(
             rmm.DeviceBuffer.to_device(
-                memoryview(simple_parquet_bytes)[r.offset : r.offset + r.size],
+                memoryview(simple_parquet_bytes)[r.offset: r.offset + r.size],
                 plc.utils._get_stream(stream),
             )
         )
@@ -667,7 +667,7 @@ def test_hybrid_scan_has_next_table_chunk(
     filter_data = [
         plc.gpumemoryview(
             rmm.DeviceBuffer.to_device(
-                memoryview(simple_parquet_bytes)[r.offset : r.offset + r.size],
+                memoryview(simple_parquet_bytes)[r.offset: r.offset + r.size],
                 plc.utils._get_stream(),
             )
         )
@@ -737,7 +737,7 @@ def test_hybrid_scan_chunked_reading(
     filter_data = [
         plc.gpumemoryview(
             rmm.DeviceBuffer.to_device(
-                memoryview(simple_parquet_bytes)[r.offset : r.offset + r.size],
+                memoryview(simple_parquet_bytes)[r.offset: r.offset + r.size],
                 plc.utils._get_stream(stream),
             )
         )
@@ -1047,6 +1047,39 @@ def test_hybrid_scan_filter_row_groups_with_dictionary_pages_short_flba_decimals
         )
 
 
+def test_hybrid_scan_dictionary_page_filter_long_strings() -> (
+    None
+):
+    """Dictionary values are prefixed with their 4 byte length, which can exceed 255."""
+    # Row group 0 holds "x...x5" and row group 1 holds "x...x6"
+    prefix = "x" * 300
+    buf = io.BytesIO()
+    pq.write_table(
+        pa.table({"s": [f"{prefix}5"] * 10 + [f"{prefix}6"] * 10}),
+        buf,
+        row_group_size=10,
+        use_dictionary=True,
+    )
+    parquet_bytes = buf.getvalue()
+    options = plc.io.parquet.ParquetReaderOptions.builder(
+        plc.io.SourceInfo([io.BytesIO(parquet_bytes)])
+    ).build()
+    reader = HybridScanReader(_footer_bytes(parquet_bytes), options)
+
+    for value, expected in [(5, [0]), (6, [1]), (7, [])]:
+        filter_expression = Operation(
+            ASTOperator.EQUAL,
+            ColumnNameReference("s"),
+            Literal(plc.Scalar.from_arrow(pa.scalar(f"{prefix}{value}"))),
+        )
+        assert (
+            _filter_row_groups_with_dictionary_pages(
+                reader, options, parquet_bytes, filter_expression
+            )
+            == expected
+        )
+
+
 def test_hybrid_scan_metadata_with_page_index(
     simple_parquet_bytes: bytes,
     simple_hybrid_scan_reader: HybridScanReader,
@@ -1103,7 +1136,7 @@ def test_hybrid_scan_metadata_with_page_index(
     # Fetch page index bytes from the parquet file
     simple_parquet_mv = memoryview(simple_parquet_bytes)
     page_index_mv = simple_parquet_mv[
-        page_index_byte_range.offset : page_index_byte_range.offset
+        page_index_byte_range.offset: page_index_byte_range.offset
         + page_index_byte_range.size
     ]
 
@@ -1165,11 +1198,11 @@ def test_hybrid_scan_page_index_stats_misaligned_pages(
 
     footer_size = int.from_bytes(data[-8:-4], byteorder="little")
     reader = HybridScanReader(
-        data[-8 - footer_size : -8], simple_parquet_options
+        data[-8 - footer_size: -8], simple_parquet_options
     )
     page_index = reader.page_index_byte_range()
     reader.setup_page_index(
-        data[page_index.offset : page_index.offset + page_index.size]
+        data[page_index.offset: page_index.offset + page_index.size]
     )
     row_mask = reader.build_row_mask_with_page_index_stats(
         reader.all_row_groups(simple_parquet_options), simple_parquet_options
@@ -1227,11 +1260,11 @@ def test_hybrid_scan_page_index_stats_all_null_page(
 
     footer_size = int.from_bytes(data[-8:-4], byteorder="little")
     reader = HybridScanReader(
-        data[-8 - footer_size : -8], simple_parquet_options
+        data[-8 - footer_size: -8], simple_parquet_options
     )
     page_index = reader.page_index_byte_range()
     reader.setup_page_index(
-        data[page_index.offset : page_index.offset + page_index.size]
+        data[page_index.offset: page_index.offset + page_index.size]
     )
     row_mask = reader.build_row_mask_with_page_index_stats(
         reader.all_row_groups(simple_parquet_options), simple_parquet_options
