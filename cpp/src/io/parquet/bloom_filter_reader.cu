@@ -518,7 +518,7 @@ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::ap
   auto const num_input_columns = static_cast<cudf::size_type>(output_dtypes.size());
 
   // Get parquet types for the predicate columns
-  auto const parquet_types = get_parquet_types(input_row_group_indices, bloom_filter_col_schemas);
+  auto const parquet_types = get_parquet_types(bloom_filter_col_schemas);
 
   // Byte lengths of the FIXED_LEN_BYTE_ARRAY predicate columns
   std::vector<int32_t> parquet_type_lengths(bloom_filter_col_schemas.size());

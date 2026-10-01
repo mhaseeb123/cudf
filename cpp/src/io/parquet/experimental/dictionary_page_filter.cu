@@ -1434,8 +1434,6 @@ aggregate_reader_metadata::apply_dictionary_filter(
   auto const num_dictionary_columns = static_cast<cudf::size_type>(dictionary_col_schemas.size());
   // Get parquet types for the predicate columns
   auto const parquet_types = get_parquet_types(
-    cudf::host_span<std::vector<size_type> const>{input_row_group_indices.data(),
-                                                  input_row_group_indices.size()},
     cudf::host_span<int const>{dictionary_col_schemas.data(), dictionary_col_schemas.size()});
 
   // Convert dictionary membership for (in)equality predicate columns to a table
