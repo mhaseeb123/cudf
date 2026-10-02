@@ -58,9 +58,8 @@ constexpr char to_lower_ascii(char char_value)
 std::string to_lower_ascii(std::string_view input)
 {
   std::string result(input.size(), '\0');
-  std::ranges::transform(input, result.begin(), [](char char_value) {
-    return to_lower_ascii(char_value);
-  });
+  std::ranges::transform(
+    input, result.begin(), [](char char_value) { return to_lower_ascii(char_value); });
   return result;
 }
 
