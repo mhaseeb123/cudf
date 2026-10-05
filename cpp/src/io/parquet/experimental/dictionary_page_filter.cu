@@ -1543,7 +1543,7 @@ aggregate_reader_metadata::apply_dictionary_filter(
 
 dictionary_literals_collector::dictionary_literals_collector(
   ast::expression const& expr, std::span<cudf::data_type const> output_dtypes)
-  : equality_literals_collector{output_dtypes, {}, {}}
+  : equality_literals_collector{output_dtypes, {}}
 {
   collect(expr);
 }

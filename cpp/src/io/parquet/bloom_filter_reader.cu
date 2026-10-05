@@ -314,35 +314,27 @@ struct bloom_filter_caster {
  * @param op Comparison operator
  * @param col_idx Index of the column in the output table
  * @param literal Literal compared against the column
- * @param output_dtypes Output data types of the table columns
- * @param output_column_schemas Schema indices of the table columns, or empty to skip the timestamp
- *        precision check
- * @param schema_tree Parquet schema tree
+ * @param output_dtypes Output data types of columns
+ * @param mismatched_timestamp_mask Boolean span indicating if an output column is a timestamp
+ * with mismatched precision in any source
  * @return Whether the bloom filter can be queried
  */
 [[nodiscard]] bool is_bloom_filterable(ast::ast_operator op,
                                        cudf::size_type col_idx,
                                        ast::literal const& literal,
                                        std::span<cudf::data_type const> output_dtypes,
-                                       std::span<cudf::size_type const> output_column_schemas,
-                                       std::span<SchemaElement const> schema_tree)
+                                       std::span<bool const> mismatched_timestamp_mask)
 {
-  // A bloom filter answers only "might this value be present", so only equality can be evaluated
+  // A bloom filter only answers "value may be present", so only equality can be evaluated
   if (op != ast::ast_operator::EQUAL) { return false; }
 
   // A timestamp literal of another precision than the column's native one would never match the
-  // values hashed into the bloom filter
-  auto const& dtype = output_dtypes[col_idx];
-  if (not output_column_schemas.empty() and cudf::is_timestamp(dtype)) {
-    auto const& schema   = schema_tree[output_column_schemas[col_idx]];
-    auto const clockrate = cudf::io::detail::to_clockrate(dtype.id());
-    if (schema.logical_type.has_value() and
-        calc_timestamp_scale(schema.logical_type, clockrate) != 0) {
-      return false;
-    }
+  // values hashed into the bloom filters
+  if (not mismatched_timestamp_mask.empty() and mismatched_timestamp_mask[col_idx]) {
+    return false;
   }
 
-  return is_membership_queryable(dtype, literal);
+  return is_membership_queryable(output_dtypes[col_idx], literal);
 }
 
 /**
@@ -353,12 +345,10 @@ class bloom_filter_expression_converter final : public parquet_expression_simpli
  public:
   bloom_filter_expression_converter(ast::expression const& expr,
                                     std::span<cudf::data_type const> output_dtypes,
-                                    std::span<cudf::size_type const> output_column_schemas,
-                                    std::span<SchemaElement const> schema_tree,
+                                    std::span<bool const> mismatched_timestamp_mask,
                                     std::span<std::vector<ast::literal*> const> equality_literals)
     : parquet_expression_simplifier{output_dtypes},
-      _output_column_schemas{output_column_schemas},
-      _schema_tree{schema_tree},
+      _mismatched_timestamp_mask{mismatched_timestamp_mask},
       _equality_literals{equality_literals}
   {
     // Compute and store columns literals offsets
@@ -403,9 +393,8 @@ class bloom_filter_expression_converter final : public parquet_expression_simpli
 
     auto const col_idx = col_ref.get_column_index();
 
-    // Return early if the bloom filter cannot be queried for the column and literal
-    if (not is_bloom_filterable(
-          op, col_idx, literal, _output_dtypes, _output_column_schemas, _schema_tree)) {
+    // Return early if non-bloom-filterable
+    if (not is_bloom_filterable(op, col_idx, literal, _output_dtypes, _mismatched_timestamp_mask)) {
       return std::nullopt;
     }
 
@@ -425,8 +414,7 @@ class bloom_filter_expression_converter final : public parquet_expression_simpli
 
  private:
   std::vector<cudf::size_type> _col_literals_offsets;
-  std::span<cudf::size_type const> _output_column_schemas;
-  std::span<SchemaElement const> _schema_tree;
+  std::span<bool const> _mismatched_timestamp_mask;
   std::span<std::vector<ast::literal*> const> _equality_literals;
   simplified_expression_opt _bloom_filter_expr;
 };
@@ -541,13 +529,40 @@ aggregate_reader_metadata::read_bloom_filters(
   return {std::move(bloom_filter_buffers), std::move(bloom_filter_data)};
 }
 
+thrust::host_vector<bool> aggregate_reader_metadata::calc_mismatched_timestamp_mask(
+  std::span<data_type const> output_dtypes, std::span<int const> output_column_schemas) const
+{
+  CUDF_EXPECTS(output_column_schemas.size() == output_dtypes.size(),
+               "output_column_schemas must have the same size as output_dtypes");
+
+  thrust::host_vector<bool> mismatched(output_dtypes.size(), false);
+  for (std::size_t col_idx = 0; col_idx < output_dtypes.size(); ++col_idx) {
+    auto const dtype = output_dtypes[col_idx];
+    if (not cudf::is_timestamp(dtype)) { continue; }
+    auto const clockrate = cudf::io::detail::to_clockrate(dtype.id());
+    // Sources may store the column with different precisions as their logical types are not
+    // required to match
+    mismatched[col_idx] =
+      std::any_of(cuda::counting_iterator<std::size_t>{0},
+                  cuda::counting_iterator{per_file_metadata.size()},
+                  [&](auto const src_idx) {
+                    auto const& schema = get_schema(
+                      map_schema_index(output_column_schemas[col_idx], static_cast<int>(src_idx)),
+                      static_cast<int>(src_idx));
+                    return schema.logical_type.has_value() and
+                           calc_timestamp_scale(schema.logical_type, clockrate) != 0;
+                  });
+  }
+  return mismatched;
+}
+
 std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::apply_bloom_filters(
   std::span<cudf::device_span<cuda::std::byte const> const> bloom_filter_data,
   std::span<std::vector<size_type> const> input_row_group_indices,
   std::span<std::vector<ast::literal*> const> literals,
   size_type total_row_groups,
   std::span<data_type const> output_dtypes,
-  std::span<cudf::size_type const> output_column_schemas,
+  std::span<bool const> mismatched_timestamp_mask,
   std::span<cudf::size_type const> bloom_filter_col_schemas,
   std::reference_wrapper<ast::expression const> filter,
   cuda::stream_ref stream) const
@@ -555,7 +570,7 @@ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::ap
   // Convert AST to BloomfilterAST expression with reference to bloom filter membership
   // in above `bloom_filter_membership_table`
   bloom_filter_expression_converter bloom_filter_expr_converter{
-    filter.get(), output_dtypes, output_column_schemas, per_file_metadata[0].schema, literals};
+    filter.get(), output_dtypes, mismatched_timestamp_mask, literals};
 
   // Return early if bloom filters cannot prune any row groups using the filter
   auto const bloom_filter_expr = bloom_filter_expr_converter.get_bloom_filter_expr();
@@ -621,16 +636,13 @@ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::ap
 }
 
 equality_literals_collector::equality_literals_collector(
-  std::span<cudf::data_type const> output_dtypes,
-  std::span<cudf::size_type const> output_column_schemas,
-  std::span<SchemaElement const> schema_tree)
+  std::span<cudf::data_type const> output_dtypes, std::span<bool const> mismatched_timestamp_mask)
   : parquet_expression_simplifier{output_dtypes},
-    _output_column_schemas{output_column_schemas},
-    _schema_tree{schema_tree}
+    _mismatched_timestamp_mask{mismatched_timestamp_mask}
 {
   CUDF_EXPECTS(
-    _output_column_schemas.empty() or _output_column_schemas.size() == output_dtypes.size(),
-    "output_column_schemas must have the same size as output_dtypes when provided");
+    _mismatched_timestamp_mask.empty() or _mismatched_timestamp_mask.size() == output_dtypes.size(),
+    "mismatched_timestamp_mask must have the same size as output_dtypes when provided");
   _literals.resize(static_cast<size_type>(output_dtypes.size()));
   _operators.resize(static_cast<size_type>(output_dtypes.size()));
 }
@@ -638,9 +650,8 @@ equality_literals_collector::equality_literals_collector(
 equality_literals_collector::equality_literals_collector(
   ast::expression const& expr,
   std::span<cudf::data_type const> output_dtypes,
-  std::span<cudf::size_type const> output_column_schemas,
-  std::span<SchemaElement const> schema_tree)
-  : equality_literals_collector{output_dtypes, output_column_schemas, schema_tree}
+  std::span<bool const> mismatched_timestamp_mask)
+  : equality_literals_collector{output_dtypes, mismatched_timestamp_mask}
 {
   collect(expr);
 }
@@ -681,9 +692,8 @@ simplified_expression_opt equality_literals_collector::simplify_comparison(
 {
   auto const col_idx = col_ref.get_column_index();
 
-  // Do not collect literals that cannot be evaluated with bloom filters
-  if (not is_bloom_filterable(
-        op, col_idx, literal, _output_dtypes, _output_column_schemas, _schema_tree)) {
+  // Do not collect non-bloom-filterable literals
+  if (not is_bloom_filterable(op, col_idx, literal, _output_dtypes, _mismatched_timestamp_mask)) {
     return std::nullopt;
   }
 
