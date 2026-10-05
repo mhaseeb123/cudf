@@ -8,8 +8,10 @@ import pyarrow.parquet as pq
 import pytest
 from utils import (
     BLOOM_FILTER_OPTIONS,
+    extract_parquet_footer,
     requires_pyarrow_bloom_filters,
     synchronize_stream,
+    write_hybrid_scan_parquet_bytes,
 )
 
 import rmm
@@ -27,26 +29,6 @@ from pylibcudf.io.experimental import (
     ReadColumnsMode,
     UseDataPageMask,
 )
-
-
-def _footer_bytes(parquet_bytes: bytes) -> memoryview:
-    """Extract the footer bytes from a parquet file.
-
-    According to Parquet file format specification:
-    https://parquet.apache.org/docs/file-format/
-    """
-    PARQUET_FOOTER_SIZE_BYTES = 4  # Number of bytes encoding footer length
-    PARQUET_MAGIC_BYTES = 4  # Number of bytes for "PAR1" magic number
-    PARQUET_SUFFIX_BYTES = PARQUET_FOOTER_SIZE_BYTES + PARQUET_MAGIC_BYTES
-
-    parquet_mv = memoryview(parquet_bytes)
-    footer_size = int.from_bytes(
-        parquet_mv[-PARQUET_SUFFIX_BYTES:-PARQUET_MAGIC_BYTES],
-        byteorder="little",
-    )
-    footer_start = len(parquet_mv) - PARQUET_SUFFIX_BYTES - footer_size
-    footer_end = len(parquet_mv) - PARQUET_SUFFIX_BYTES
-    return parquet_mv[footer_start:footer_end]
 
 
 def _filter_row_groups_with_dictionary_pages(
@@ -114,16 +96,9 @@ def simple_parquet_bytes(
     simple_parquet_table: pa.Table, row_group_size: int
 ) -> bytes:
     """Create parquet bytes from the simple table."""
-    buf = io.BytesIO()
-    pq.write_table(
-        simple_parquet_table,
-        buf,
-        row_group_size=row_group_size,
-        use_dictionary=True,
-        write_statistics=True,
-        write_page_index=True,
+    return write_hybrid_scan_parquet_bytes(
+        simple_parquet_table, row_group_size
     )
-    return buf.getvalue()
 
 
 @pytest.fixture
@@ -148,9 +123,8 @@ def simple_hybrid_scan_reader(
     Note: This is function-scoped (not module-scoped) because it depends on
     the function-scoped simple_parquet_options fixture.
     """
-    return HybridScanReader(
-        _footer_bytes(simple_parquet_bytes), simple_parquet_options
-    )
+    footer_mv = extract_parquet_footer(simple_parquet_bytes)
+    return HybridScanReader(footer_mv, simple_parquet_options)
 
 
 def test_hybrid_scan_reader_basic(
@@ -305,7 +279,9 @@ def test_hybrid_scan_bloom_filter_byte_ranges_discarded_or(
     def bloom_ranges(expression):
         options = plc.io.parquet.ParquetReaderOptions()
         options.set_filter(expression)
-        reader = HybridScanReader(_footer_bytes(buf.getvalue()), options)
+        reader = HybridScanReader(
+            extract_parquet_footer(buf.getvalue()), options
+        )
         row_groups = reader.all_row_groups(options)
         ranges = reader.bloom_filters_byte_ranges(row_groups, options)
         return [(r.offset, r.size) for r in ranges]
@@ -1069,7 +1045,7 @@ def test_hybrid_scan_filter_row_groups_with_dictionary_pages_short_flba_decimals
     options = plc.io.parquet.ParquetReaderOptions.builder(
         plc.io.SourceInfo([io.BytesIO(parquet_bytes)])
     ).build()
-    reader = HybridScanReader(_footer_bytes(parquet_bytes), options)
+    reader = HybridScanReader(extract_parquet_footer(parquet_bytes), options)
 
     for value, expected in [(-55, [0]), (-53, [])]:
         literal = pa.array([decimal.Decimal(value).scaleb(-2)], literal_type)[
@@ -1103,7 +1079,7 @@ def test_hybrid_scan_dictionary_page_filter_long_strings() -> None:
     options = plc.io.parquet.ParquetReaderOptions.builder(
         plc.io.SourceInfo([io.BytesIO(parquet_bytes)])
     ).build()
-    reader = HybridScanReader(_footer_bytes(parquet_bytes), options)
+    reader = HybridScanReader(extract_parquet_footer(parquet_bytes), options)
 
     for value, expected in [(5, [0]), (6, [1]), (7, [])]:
         filter_expression = Operation(
@@ -1257,9 +1233,8 @@ def test_hybrid_scan_page_index_stats_misaligned_pages(
     )
     simple_parquet_options.set_filter(filter_expression)
 
-    footer_size = int.from_bytes(data[-8:-4], byteorder="little")
     reader = HybridScanReader(
-        data[-8 - footer_size : -8], simple_parquet_options
+        extract_parquet_footer(data), simple_parquet_options
     )
     page_index = reader.page_index_byte_range()
     reader.setup_page_index(
@@ -1319,9 +1294,8 @@ def test_hybrid_scan_page_index_stats_all_null_page(
 
     simple_parquet_options.set_filter(filter_expression)
 
-    footer_size = int.from_bytes(data[-8:-4], byteorder="little")
     reader = HybridScanReader(
-        data[-8 - footer_size : -8], simple_parquet_options
+        extract_parquet_footer(data), simple_parquet_options
     )
     page_index = reader.page_index_byte_range()
     reader.setup_page_index(
