@@ -7,9 +7,8 @@ import pyarrow.parquet as pq
 import pytest
 from utils import (
     BLOOM_FILTER_OPTIONS,
-    requires_pyarrow_bloom_filters,
-    synchronize_stream,
     extract_parquet_footer,
+    requires_pyarrow_bloom_filters,
     synchronize_stream,
     write_hybrid_scan_parquet_bytes,
 )
@@ -248,9 +247,9 @@ def test_hybrid_scan_bloom_filter_byte_ranges_discarded_or(
     def bloom_ranges(expression):
         options = plc.io.parquet.ParquetReaderOptions()
         options.set_filter(expression)
-        data = memoryview(buf.getvalue())
-        footer_size = int.from_bytes(data[-8:-4], byteorder="little")
-        reader = HybridScanReader(data[-8 - footer_size : -8], options)
+        reader = HybridScanReader(
+            extract_parquet_footer(buf.getvalue()), options
+        )
         row_groups = reader.all_row_groups(options)
         ranges = reader.bloom_filters_byte_ranges(row_groups, options)
         return [(r.offset, r.size) for r in ranges]
@@ -1137,9 +1136,8 @@ def test_hybrid_scan_page_index_stats_misaligned_pages(
     )
     simple_parquet_options.set_filter(filter_expression)
 
-    footer_size = int.from_bytes(data[-8:-4], byteorder="little")
     reader = HybridScanReader(
-        data[-8 - footer_size : -8], simple_parquet_options
+        extract_parquet_footer(data), simple_parquet_options
     )
     page_index = reader.page_index_byte_range()
     reader.setup_page_index(
