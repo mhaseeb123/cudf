@@ -14,6 +14,8 @@
 #include <cudf/io/parquet_schema.hpp>
 #include <cudf/types.hpp>
 
+#include <thrust/host_vector.h>
+
 #include <algorithm>
 #include <exception>
 #include <functional>
@@ -444,6 +446,23 @@ class aggregate_reader_metadata {
 
  protected:
   /**
+   * @brief Computes a boolean mask indicating if an output column is a timestamp whose precision in
+   * any source differs from the output precision
+   *
+   * A column is flagged if its Parquet timestamp logical type requires rescaling to the output
+   * clock rate in any source, as sources are not required to store a column with the same
+   * precision.
+   *
+   * @param output_dtypes Output column data types
+   * @param output_column_schemas Output column schema indices
+   *
+   * @return Boolean vector indicating if the output column is a timestamp with mismatched precision
+   * in any source
+   */
+  [[nodiscard]] thrust::host_vector<bool> calc_mismatched_timestamp_mask(
+    std::span<data_type const> output_dtypes, std::span<int const> output_column_schemas) const;
+
+  /**
    * @brief Filters the row groups using stats filter
    *
    * @param input_row_group_indices Lists of input row groups, one per source
@@ -471,7 +490,8 @@ class aggregate_reader_metadata {
    * @param literals Lists of equality literals, one per each input row group
    * @param total_row_groups Total number of row groups in `input_row_group_indices`
    * @param output_dtypes Datatypes of output columns
-   * @param output_column_schemas Schema indices of output columns
+   * @param mismatched_timestamp_mask Boolean span indicating if an output column is a timestamp
+   * with mismatched precision in any source
    * @param bloom_filter_col_schemas Schema indices of bloom filter columns only
    * @param filter AST expression to filter row groups based on bloom filter membership
    * @param stream CUDA stream used for device memory operations and kernel launches
@@ -484,7 +504,7 @@ class aggregate_reader_metadata {
     host_span<std::vector<ast::literal*> const> literals,
     size_type total_row_groups,
     host_span<data_type const> output_dtypes,
-    host_span<int const> output_column_schemas,
+    host_span<bool const> mismatched_timestamp_mask,
     host_span<int const> bloom_filter_col_schemas,
     std::reference_wrapper<ast::expression const> filter,
     cuda::stream_ref stream) const;
