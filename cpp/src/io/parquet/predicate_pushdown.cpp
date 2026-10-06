@@ -209,7 +209,8 @@ aggregate_reader_metadata::filter_row_groups(
             {std::make_optional(num_stats_filtered_row_groups), std::nullopt}};
   }
 
-  auto const equality_literals = std::move(literals_collector).get_literals();
+  auto const [equality_literals, equality_operators] =
+    std::move(literals_collector).get_literals_and_operators();
 
   // Collect schema indices of columns with equality predicate(s)
   std::vector<cudf::size_type> equality_col_schemas;
@@ -240,9 +241,9 @@ aggregate_reader_metadata::filter_row_groups(
   auto const bloom_filtered_row_groups = apply_bloom_filters(bloom_filter_data,
                                                              bloom_filter_input_row_groups,
                                                              equality_literals,
+                                                             equality_operators,
                                                              num_stats_filtered_row_groups,
                                                              output_dtypes,
-                                                             mismatched_timestamp_mask,
                                                              equality_col_schemas,
                                                              filter,
                                                              stream);

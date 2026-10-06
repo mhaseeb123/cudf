@@ -345,11 +345,11 @@ class bloom_filter_expression_converter final : public parquet_expression_simpli
  public:
   bloom_filter_expression_converter(ast::expression const& expr,
                                     std::span<cudf::data_type const> output_dtypes,
-                                    std::span<bool const> mismatched_timestamp_mask,
-                                    std::span<std::vector<ast::literal*> const> equality_literals)
+                                    std::span<std::vector<ast::literal*> const> equality_literals,
+                                    std::span<std::vector<ast::ast_operator> const> operators)
     : parquet_expression_simplifier{output_dtypes},
-      _mismatched_timestamp_mask{mismatched_timestamp_mask},
-      _equality_literals{equality_literals}
+      _equality_literals{equality_literals},
+      _operators{operators}
   {
     // Compute and store columns literals offsets
     _col_literals_offsets.reserve(static_cast<cudf::size_type>(_output_dtypes.size()) + 1);
@@ -391,31 +391,29 @@ class bloom_filter_expression_converter final : public parquet_expression_simpli
   {
     using cudf::ast::ast_operator;
 
-    auto const col_idx = col_ref.get_column_index();
+    auto const col_idx             = col_ref.get_column_index();
+    auto const& equality_literals  = _equality_literals[col_idx];
+    auto const& equality_operators = _operators[col_idx];
+    auto const literal_indices     = std::views::iota(std::size_t{0}, equality_literals.size());
 
-    // Return early if non-bloom-filterable
-    if (not is_bloom_filterable(op, col_idx, literal, _output_dtypes, _mismatched_timestamp_mask)) {
-      return std::nullopt;
-    }
+    // A literal may be shared by multiple comparisons, so the operator must match as well
+    auto const literal_iter = std::ranges::find_if(literal_indices, [&](auto idx) {
+      return equality_literals[idx] == &literal and equality_operators[idx] == op;
+    });
 
-    auto const& equality_literals = _equality_literals[col_idx];
-    auto const literal_iter =
-      std::find(equality_literals.cbegin(), equality_literals.cend(), &literal);
-
-    // Skip bloom filter probing for literals not collected by the equality literals collector
-    if (literal_iter == equality_literals.cend()) { return std::nullopt; }
+    // Unsupported comparisons and those in discarded OR branches were not collected
+    if (literal_iter == literal_indices.end()) { return std::nullopt; }
 
     auto const col_literal_offset =
-      _col_literals_offsets[col_idx] +
-      static_cast<cudf::size_type>(std::distance(equality_literals.cbegin(), literal_iter));
+      _col_literals_offsets[col_idx] + static_cast<cudf::size_type>(*literal_iter);
     auto const& value = _tree.push(ast::column_reference{col_literal_offset});
     return _tree.push(ast::operation{ast_operator::IDENTITY, value});
   }
 
  private:
   std::vector<cudf::size_type> _col_literals_offsets;
-  std::span<bool const> _mismatched_timestamp_mask;
   std::span<std::vector<ast::literal*> const> _equality_literals;
+  std::span<std::vector<ast::ast_operator> const> _operators;
   simplified_expression_opt _bloom_filter_expr;
 };
 
@@ -560,9 +558,9 @@ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::ap
   cudf::host_span<cudf::device_span<cuda::std::byte const> const> bloom_filter_data,
   host_span<std::vector<size_type> const> input_row_group_indices,
   host_span<std::vector<ast::literal*> const> literals,
+  host_span<std::vector<ast::ast_operator> const> operators,
   size_type total_row_groups,
   host_span<data_type const> output_dtypes,
-  host_span<bool const> mismatched_timestamp_mask,
   host_span<cudf::size_type const> bloom_filter_col_schemas,
   std::reference_wrapper<ast::expression const> filter,
   cuda::stream_ref stream) const
@@ -572,8 +570,8 @@ std::optional<std::vector<std::vector<size_type>>> aggregate_reader_metadata::ap
   bloom_filter_expression_converter bloom_filter_expr_converter{
     filter.get(),
     std::span{output_dtypes.data(), output_dtypes.size()},
-    std::span{mismatched_timestamp_mask.data(), mismatched_timestamp_mask.size()},
-    std::span{literals.data(), literals.size()}};
+    std::span{literals.data(), literals.size()},
+    std::span{operators.data(), operators.size()}};
 
   // Return early if bloom filters cannot prune any row groups using the filter
   auto const bloom_filter_expr = bloom_filter_expr_converter.get_bloom_filter_expr();
@@ -701,9 +699,10 @@ simplified_expression_opt equality_literals_collector::simplify_comparison(
   return _tree.push(ast::operation{op, col_ref, literal});
 }
 
-std::vector<std::vector<ast::literal*>> equality_literals_collector::get_literals() &&
+std::pair<std::vector<std::vector<ast::literal*>>, std::vector<std::vector<ast::ast_operator>>>
+equality_literals_collector::get_literals_and_operators() &&
 {
-  return std::move(_literals);
+  return {std::move(_literals), std::move(_operators)};
 }
 
 }  // namespace cudf::io::parquet::detail

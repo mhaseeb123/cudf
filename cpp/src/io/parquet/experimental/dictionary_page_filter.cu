@@ -1385,9 +1385,7 @@ class dictionary_expression_converter final : public parquet_expression_simplifi
   {
     using cudf::ast::ast_operator;
 
-    auto const col_idx = col_ref.get_column_index();
-    if (not is_dictionary_filterable(op, _output_dtypes[col_idx], literal)) { return std::nullopt; }
-
+    auto const col_idx             = col_ref.get_column_index();
     auto const& equality_literals  = _literals[col_idx];
     auto const& equality_operators = _operators[col_idx];
     auto const literal_indices     = std::views::iota(std::size_t{0}, equality_literals.size());
@@ -1395,7 +1393,7 @@ class dictionary_expression_converter final : public parquet_expression_simplifi
       return equality_literals[idx] == &literal and equality_operators[idx] == op;
     });
 
-    // Supported comparisons in discarded OR branches were not collected.
+    // Unsupported comparisons and those in discarded OR branches were not collected
     if (literal_iter == literal_indices.end()) { return std::nullopt; }
 
     auto const col_literal_offset =
@@ -1535,12 +1533,6 @@ simplified_expression_opt dictionary_literals_collector::simplify_comparison(
   if (not is_dictionary_filterable(op, _output_dtypes[col_idx], literal)) { return std::nullopt; }
 
   return _tree.push(ast::operation{op, col_ref, literal});
-}
-
-std::pair<std::vector<std::vector<ast::literal*>>, std::vector<std::vector<ast::ast_operator>>>
-dictionary_literals_collector::get_literals_and_operators() &&
-{
-  return {std::move(_literals), std::move(_operators)};
 }
 
 }  // namespace cudf::io::parquet::experimental::detail

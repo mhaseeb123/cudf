@@ -487,11 +487,10 @@ class aggregate_reader_metadata {
    *
    * @param bloom_filter_data Device spans of bloom filter data for each input row group
    * @param input_row_group_indices Lists of input row groups, one per source
-   * @param literals Lists of equality literals, one per each input row group
+   * @param literals Lists of equality literals, one per output column
+   * @param operators Lists of comparison operators for `literals`, one per output column
    * @param total_row_groups Total number of row groups in `input_row_group_indices`
    * @param output_dtypes Datatypes of output columns
-   * @param mismatched_timestamp_mask Boolean span indicating if an output column is a timestamp
-   * with mismatched precision in any source
    * @param bloom_filter_col_schemas Schema indices of bloom filter columns only
    * @param filter AST expression to filter row groups based on bloom filter membership
    * @param stream CUDA stream used for device memory operations and kernel launches
@@ -502,9 +501,9 @@ class aggregate_reader_metadata {
     cudf::host_span<cudf::device_span<cuda::std::byte const> const> bloom_filter_data,
     host_span<std::vector<size_type> const> input_row_group_indices,
     host_span<std::vector<ast::literal*> const> literals,
+    host_span<std::vector<ast::ast_operator> const> operators,
     size_type total_row_groups,
     host_span<data_type const> output_dtypes,
-    host_span<bool const> mismatched_timestamp_mask,
     host_span<int const> bloom_filter_col_schemas,
     std::reference_wrapper<ast::expression const> filter,
     cuda::stream_ref stream) const;
