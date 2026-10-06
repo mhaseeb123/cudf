@@ -71,7 +71,10 @@ class StringFunction(Expr):
         Extract = auto()
         ExtractAll = auto()
         ExtractGroups = auto()
+        ExtractMany = auto()
         Find = auto()
+        FindMany = auto()
+        Format = auto()
         Head = auto()
         HexDecode = auto()
         HexEncode = auto()
@@ -764,12 +767,8 @@ class StringFunction(Expr):
             return Column(
                 plc.strings.slice.slice_strings(
                     column.obj,
-                    plc.Scalar.from_py(
-                        start, plc.DataType(plc.TypeId.INT32), stream=df.stream
-                    ),
-                    plc.Scalar.from_py(
-                        stop, plc.DataType(plc.TypeId.INT32), stream=df.stream
-                    ),
+                    start,
+                    stop,
                     stream=df.stream,
                 ),
                 dtype=self.dtype,
@@ -852,12 +851,8 @@ class StringFunction(Expr):
             mask = find(plc_column, target, stream=df.stream)
             sliced = plc.strings.slice.slice_strings(
                 plc_column,
-                plc.Scalar.from_py(
-                    start, plc.DataType(plc.TypeId.INT32), stream=df.stream
-                ),
-                plc.Scalar.from_py(
-                    end, plc.DataType(plc.TypeId.INT32), stream=df.stream
-                ),
+                start,
+                end,
                 stream=df.stream,
             )
             return Column(
@@ -1020,12 +1015,8 @@ class StringFunction(Expr):
             return Column(
                 plc.strings.slice.slice_strings(
                     column.obj,
-                    plc.Scalar.from_py(
-                        start, plc.DataType(plc.TypeId.INT32), stream=df.stream
-                    ),
-                    plc.Scalar.from_py(
-                        stop, plc.DataType(plc.TypeId.INT32), stream=df.stream
-                    ),
+                    start,
+                    stop,
                     stream=df.stream,
                 ),
                 self.dtype,
@@ -1086,7 +1077,7 @@ class StringFunction(Expr):
                 # Polars begins inference with the first non null value
                 if plc_col.null_mask() is not None:
                     boolmask = plc.unary.is_valid(plc_col, stream=df.stream)
-                    table = plc.stream_compaction.apply_boolean_mask(
+                    table = plc.stream_compaction.apply_retention_mask(
                         plc.Table([plc_col]), boolmask, stream=df.stream
                     )
                     filtered = table.columns()[0]

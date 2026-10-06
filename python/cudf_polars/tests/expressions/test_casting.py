@@ -14,7 +14,12 @@ from cudf_polars.testing.asserts import (
 )
 from cudf_polars.testing.engine_utils import is_streaming_engine
 
-_supported_dtypes = [(pl.Int8(), pl.Int64())]
+_supported_dtypes = [
+    (pl.Int8(), pl.Int64()),
+    (pl.Date(), pl.Float64()),
+    (pl.Datetime("us"), pl.Float64()),
+    (pl.Duration("ms"), pl.Float64()),
+]
 
 _unsupported_dtypes = [
     (pl.Boolean(), pl.Datetime("ns")),
@@ -87,10 +92,10 @@ def test_cast_from_string_unsupported(engine: pl.GPUEngine):
     assert_ir_translation_raises(query, engine, NotImplementedError)
 
 
-def test_cast_to_string_unsupported(engine: pl.GPUEngine):
-    df = pl.LazyFrame({"a": [True]})
+def test_cast_bool_to_string(engine: pl.GPUEngine):
+    df = pl.LazyFrame({"a": [True, False, None]})
     query = df.select(pl.col("a").cast(pl.String()))
-    assert_ir_translation_raises(query, engine, NotImplementedError)
+    assert_gpu_result_equal(query, engine=engine)
 
 
 def test_float_to_decimal_rounding(engine: pl.GPUEngine):

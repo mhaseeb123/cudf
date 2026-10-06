@@ -10,6 +10,7 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/detail/copy.hpp>
 #include <cudf/detail/interop.hpp>
+#include <cudf/detail/utilities/cuda.hpp>
 #include <cudf/detail/utilities/cuda_memcpy.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/interop.hpp>
@@ -22,11 +23,12 @@
 #include <cudf/utilities/memory_resource.hpp>
 
 #include <rmm/cuda_device.hpp>
-#include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp>
 #include <rmm/device_uvector.hpp>
 
+#include <cuda/buffer>
 #include <cuda/iterator>
+#include <cuda/stream>
 #include <thrust/transform.h>
 
 #include <nanoarrow/nanoarrow.h>
@@ -44,9 +46,9 @@ constexpr int chars_buffer_idx = 2;
 
 std::unique_ptr<column> from_arrow_string(ArrowSchemaView const* schema,
                                           ArrowArray const* input,
-                                          std::unique_ptr<rmm::device_buffer>&& mask,
+                                          std::unique_ptr<cuda::device_buffer<std::byte>>&& mask,
                                           size_type null_count,
-                                          rmm::cuda_stream_view stream,
+                                          cuda::stream_ref stream,
                                           rmm::device_async_resource_ref mr)
 {
   auto [offsets_column, offset, char_data_length] = get_offsets_column(schema, input, stream, mr);
@@ -64,11 +66,12 @@ std::unique_ptr<column> from_arrow_string(ArrowSchemaView const* schema,
 
 constexpr int stringview_vector_idx = 1;
 
-std::unique_ptr<column> from_arrow_stringview(ArrowSchemaView const* schema,
-                                              ArrowArray const* input,
-                                              std::unique_ptr<rmm::device_buffer>&& mask,
-                                              rmm::cuda_stream_view stream,
-                                              rmm::device_async_resource_ref mr)
+std::unique_ptr<column> from_arrow_stringview(
+  ArrowSchemaView const* schema,
+  ArrowArray const* input,
+  std::unique_ptr<cuda::device_buffer<std::byte>>&& mask,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr)
 {
   ArrowArrayView view;
   NANOARROW_THROW_NOT_OK(ArrowArrayViewInitFromSchema(&view, schema->schema, nullptr));
@@ -81,18 +84,26 @@ std::unique_ptr<column> from_arrow_stringview(ArrowSchemaView const* schema,
     d_items.data(), items + input->offset, input->length * sizeof(ArrowBinaryView), stream));
 
   // then copy variadic buffers to device
-  auto variadics     = std::vector<rmm::device_buffer>();
+  auto variadics     = std::vector<cuda::device_buffer<char>>();
   auto variadic_ptrs = std::vector<char const*>();
   for (auto i = 0L; i < view.n_variadic_buffers; ++i) {
-    variadics.emplace_back(view.variadic_buffers[i], view.variadic_buffer_sizes[i], stream);
-    variadic_ptrs.push_back(static_cast<char const*>(variadics.back().data()));
+    auto const* const data = static_cast<char const*>(view.variadic_buffers[i]);
+    if (view.variadic_buffer_sizes[i] == 0) {
+      variadics.emplace_back(stream, cudf::get_current_device_resource_ref());
+    } else {
+      variadics.emplace_back(stream,
+                             cudf::get_current_device_resource_ref(),
+                             data,
+                             data + view.variadic_buffer_sizes[i]);
+    }
+    variadic_ptrs.push_back(variadics.back().data());
   }
 
   // copy variadic device pointers to device
   auto d_variadic_ptrs = cudf::detail::make_device_uvector_async(
     variadic_ptrs, stream, cudf::get_current_device_resource_ref());
   auto d_ptrs = d_variadic_ptrs.data();
-  auto d_mask = static_cast<cudf::bitmask_type*>(mask->data());
+  auto d_mask = reinterpret_cast<cudf::bitmask_type*>(mask->data());
 
   using string_index_pair = cudf::strings::detail::string_index_pair;
 
@@ -113,18 +124,19 @@ std::unique_ptr<column> from_arrow_stringview(ArrowSchemaView const* schema,
       return {data, size};
     });
 
-  stream.synchronize();
+  cudf::detail::sync_stream(stream);
   return cudf::make_strings_column(d_indices, stream, mr);
 }
 
 }  // namespace
 
-std::unique_ptr<column> string_column_from_arrow_host(ArrowSchemaView const* schema,
-                                                      ArrowArray const* input,
-                                                      std::unique_ptr<rmm::device_buffer>&& mask,
-                                                      size_type null_count,
-                                                      rmm::cuda_stream_view stream,
-                                                      rmm::device_async_resource_ref mr)
+std::unique_ptr<column> string_column_from_arrow_host(
+  ArrowSchemaView const* schema,
+  ArrowArray const* input,
+  std::unique_ptr<cuda::device_buffer<std::byte>>&& mask,
+  size_type null_count,
+  cuda::stream_ref stream,
+  rmm::device_async_resource_ref mr)
 {
   return schema->type == NANOARROW_TYPE_STRING_VIEW
            ? from_arrow_stringview(schema, input, std::move(mask), stream, mr)

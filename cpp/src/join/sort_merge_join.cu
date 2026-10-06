@@ -14,12 +14,12 @@
 #include <cudf/detail/nvtx/ranges.hpp>
 #include <cudf/detail/row_operator/lexicographic.cuh>
 #include <cudf/detail/sizes_to_offsets_iterator.cuh>
+#include <cudf/detail/stream_compaction.hpp>
 #include <cudf/join/join.hpp>
 #include <cudf/join/sort_merge_join.hpp>
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/null_mask.hpp>
 #include <cudf/sorting.hpp>
-#include <cudf/stream_compaction.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/types.hpp>
 #include <cudf/utilities/error.hpp>
@@ -545,7 +545,7 @@ void sort_merge_join::preprocessed_table::populate_nonnull_filter(cuda::stream_r
   // If the table has no nullable top-level columns, then we need to create
   // an all-valid bitmask that is passed to subsequent operations. This bitmask
   // is updated if any of the nested struct/list children columns have nulls.
-  if (validity_mask.is_empty())
+  if (validity_mask.empty())
     validity_mask =
       cudf::create_null_mask(table.num_rows(), mask_state::ALL_VALID, stream, temp_mr);
 
@@ -584,8 +584,8 @@ void sort_merge_join::preprocessed_table::populate_nonnull_filter(cuda::stream_r
         rmm::exec_policy_nosync(stream, cudf::get_current_device_resource_ref()),
         cuda::counting_iterator<cudf::size_type>{0},
         cuda::counting_iterator<cudf::size_type>{0} + subset_size,
-        list_nonnull_filter{static_cast<bitmask_type*>(validity_mask.data()),
-                            static_cast<bitmask_type const*>(reduced_validity_mask.data()),
+        list_nonnull_filter{reinterpret_cast<bitmask_type*>(validity_mask.data()),
+                            reinterpret_cast<bitmask_type const*>(reduced_validity_mask.data()),
                             child_positions,
                             static_cast<size_type>(subset_offset)});
     } else if (col.type().id() == type_id::STRUCT) {
@@ -628,12 +628,12 @@ void sort_merge_join::preprocessed_table::populate_nonnull_filter(cuda::stream_r
       // Process all children of the struct column
       for (auto it = col.child_begin(); it != col.child_end(); it++) {
         auto& child = *it;
-        and_bitmasks(and_bitmasks, static_cast<bitmask_type*>(validity_mask.data()), child);
+        and_bitmasks(and_bitmasks, reinterpret_cast<bitmask_type*>(validity_mask.data()), child);
       }
     }
   }
   this->_num_nulls =
-    null_count(static_cast<bitmask_type*>(validity_mask.data()), 0, table.num_rows(), stream);
+    null_count(reinterpret_cast<bitmask_type*>(validity_mask.data()), 0, table.num_rows(), stream);
   this->_validity_mask = std::move(validity_mask);
 }
 
@@ -648,7 +648,9 @@ void sort_merge_join::preprocessed_table::apply_nonnull_filter(cuda::stream_ref 
                "Something went wrong while dropping nulls in the unprocessed tables");
   bool_mask->set_null_mask(_validity_mask.value(), _num_nulls.value(), stream);
 
-  _null_processed_table      = apply_boolean_mask(_table_view, *bool_mask, stream, temp_mr);
+  // Use the internal apply_mask directly to avoid the public API overhead (NVTX range).
+  _null_processed_table =
+    detail::apply_mask(_table_view, *bool_mask, detail::mask_type::RETENTION, stream, temp_mr);
   _null_processed_table_view = _null_processed_table.value()->view();
 }
 
@@ -729,7 +731,7 @@ rmm::device_uvector<size_type> sort_merge_join::preprocessed_table::map_table_to
     cuda::counting_iterator<size_type>{_table_view.num_rows()},
     cuda::counting_iterator<size_type>{0},
     table_mapping.begin(),
-    is_row_valid{static_cast<bitmask_type const*>(_validity_mask.value().data())},
+    is_row_valid{reinterpret_cast<bitmask_type const*>(_validity_mask.value().data())},
     stream);
   return table_mapping;
 }
@@ -867,7 +869,7 @@ sort_merge_join::left_join(table_view const& left,
         preprocessed_left_indices->size() + static_cast<int64_t>(num_filtered_nulls);
 
       auto const validity_mask =
-        static_cast<bitmask_type const*>(preprocessed_left._validity_mask.value().data());
+        reinterpret_cast<bitmask_type const*>(preprocessed_left._validity_mask.value().data());
       rmm::device_uvector<size_type> null_left_indices{static_cast<std::size_t>(num_filtered_nulls),
                                                        stream,
                                                        cudf::get_current_device_resource_ref()};
@@ -1027,48 +1029,16 @@ sort_merge_join::inner_join(table_view const& left,
 
 std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
           std::unique_ptr<rmm::device_uvector<size_type>>>
-sort_merge_join::inner_join(table_view const& left,
-                            sorted is_left_sorted,
-                            cuda::stream_ref stream,
-                            rmm::device_async_resource_ref mr) const
-{
-  static_cast<void>(is_left_sorted);
-  return _impl->inner_join(left, stream, mr);
-}
-
-std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
-          std::unique_ptr<rmm::device_uvector<size_type>>>
 sort_merge_join::left_join(table_view const& left,
                            cuda::stream_ref stream,
                            rmm::device_async_resource_ref mr) const
 {
-  return _impl->left_join(left, stream, mr);
-}
-
-std::pair<std::unique_ptr<rmm::device_uvector<size_type>>,
-          std::unique_ptr<rmm::device_uvector<size_type>>>
-sort_merge_join::left_join(table_view const& left,
-                           sorted is_left_sorted,
-                           cuda::stream_ref stream,
-                           rmm::device_async_resource_ref mr) const
-{
-  static_cast<void>(is_left_sorted);
   return _impl->left_join(left, stream, mr);
 }
 
 std::unique_ptr<join_match_context> sort_merge_join::inner_join_match_context(
   table_view const& left, cuda::stream_ref stream, rmm::device_async_resource_ref mr) const
 {
-  return _impl->inner_join_match_context(left, stream, mr);
-}
-
-std::unique_ptr<join_match_context> sort_merge_join::inner_join_match_context(
-  table_view const& left,
-  sorted is_left_sorted,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr) const
-{
-  static_cast<void>(is_left_sorted);
   return _impl->inner_join_match_context(left, stream, mr);
 }
 

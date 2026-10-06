@@ -28,7 +28,7 @@ void run_segmented_top_k(nvbench::state& state,
                                        cudf::numeric_scalar<int32_t>(0),
                                        cudf::numeric_scalar<int32_t>(segment));
 
-  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().value()));
+  state.set_cuda_stream(nvbench::make_cuda_stream_view(cudf::get_default_stream().get()));
   state.add_global_memory_reads<nvbench::int32_t>(num_rows);
   state.add_global_memory_writes<nvbench::int32_t>(segments->size() * k);
   auto const mem_stats_logger = cudf::memory_stats_logger();

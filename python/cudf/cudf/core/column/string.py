@@ -329,7 +329,9 @@ class StringColumn(ColumnBase, Scannable):
                     "cuDF does not yet support timezone-aware datetimes"
                 )
             is_nat = self == "NaT"
-            without_nat = self.apply_boolean_mask(is_nat.unary_operator("not"))
+            without_nat = self.apply_retention_mask(
+                is_nat.unary_operator("not")
+            )
             char_counts = without_nat.count_characters()  # type: ignore[attr-defined]
             if char_counts.distinct_count(dropna=True) != 1:
                 # Unfortunately disables OK cases like:
@@ -393,7 +395,7 @@ class StringColumn(ColumnBase, Scannable):
         return result_col
 
     def as_datetime_column(self, dtype: np.dtype) -> DatetimeColumn:
-        not_null = self.apply_boolean_mask(self.notnull())
+        not_null = self.apply_retention_mask(self.notnull())
         if len(not_null) == 0:
             # We should hit the self.null_count == len(self) condition
             # so format doesn't matter
@@ -859,12 +861,15 @@ class StringColumn(ColumnBase, Scannable):
         )
 
     def normalize_characters(
-        self, normalizer: plc.nvtext.normalize.CharacterNormalizer
+        self,
+        normalizer: plc.nvtext.normalize.CharacterNormalizer,
+        flags: int = int(plc.nvtext.normalize.NormalizeFlags.PAD_PUNCTUATION),
     ) -> Self:
         with self.access(mode="read", scope="internal"):
             plc_column = plc.nvtext.normalize.normalize_characters(
                 self.plc_column,
                 normalizer,
+                flags,
             )
             return cast(
                 "Self",
@@ -1630,19 +1635,13 @@ class StringColumn(ColumnBase, Scannable):
     ) -> Self:
         with self.access(mode="read", scope="internal"):
             if isinstance(start, ColumnBase) and isinstance(stop, ColumnBase):
-                plc_start: plc.Column | plc.Scalar = start.plc_column
-                plc_stop: plc.Column | plc.Scalar = stop.plc_column
-                plc_step: plc.Scalar | None = None
+                plc_start: plc.Column | int | None = start.plc_column
+                plc_stop: plc.Column | int | None = stop.plc_column
+                plc_step: int | None = None
             elif all(isinstance(x, int) or x is None for x in (start, stop)):
-                plc_start = plc.Scalar.from_py(
-                    start, dtype=plc.DataType(plc.TypeId.INT32)
-                )
-                plc_stop = plc.Scalar.from_py(
-                    stop, dtype=plc.DataType(plc.TypeId.INT32)
-                )
-                plc_step = plc.Scalar.from_py(
-                    step, dtype=plc.DataType(plc.TypeId.INT32)
-                )
+                plc_start = cast("int | None", start)
+                plc_stop = cast("int | None", stop)
+                plc_step = step
             else:
                 raise ValueError("Invalid start and stop types")
             plc_result = plc.strings.slice.slice_strings(

@@ -410,18 +410,23 @@ engine = pl.GPUEngine(
 )
 ```
 
-Each scan node may run up to `max_concurrent_io_tasks` reads concurrently. The
-limit applies independently to each scan node, each corresponding to a
-single `pl.scan_parquet` call in the query. Configure it through
-`executor_options` or
+Each scan node may run up to `max_concurrent_io_tasks` reads concurrently. By
+default, the streaming executor chooses this limit automatically based on the
+scan's paths. The limit applies independently to each scan node, each
+corresponding to a single `pl.scan_parquet` call in the query. Configure it
+explicitly through `executor_options` or
 `CUDF_POLARS__EXECUTOR__MAX_CONCURRENT_IO_TASKS`:
 
 ```python
 engine = pl.GPUEngine(
     executor="streaming",
-    executor_options={"max_concurrent_io_tasks": 8},
+    executor_options={"max_concurrent_io_tasks": 4},
 )
 ```
+
+Passing an integer uses the same limit for all scans. Pass a
+`{"local": ..., "remote": ...}` dict, or set the environment variable to a
+JSON value like `{"remote": 16}`, to tune local and remote scans separately.
 
 Before each read is submitted, it waits for a device-memory reservation.
 This makes aggregate read concurrency respond to memory pressure across all
@@ -568,15 +573,22 @@ def test_whatever():
 Where translation of a query should fail due to the feature being
 unsupported we should test this. To assert that _translation_ raises
 an exception (usually `NotImplementedError`), use the utility function
-`assert_ir_translation_raises`:
+`assert_ir_translation_raises` with the `in_memory_engine` fixture. This fixture
+provides an in-memory GPU engine configuration, not the Polars CPU engine.
+For unsupported features rejected by the shared translator, testing every
+execution engine repeats the same check and unnecessarily initializes streaming
+engines. Use the parametrized `engine` fixture for execution tests and for
+failure modes that depend on the engine configuration.
 
 ```python
 from cudf_polars.testing.asserts import assert_ir_translation_raises
 
 
-def test_whatever(engine):
+def test_whatever(in_memory_engine):
     unsupported_query = ...
-    assert_ir_translation_raises(unsupported_query, engine, NotImplementedError)
+    assert_ir_translation_raises(
+        unsupported_query, in_memory_engine, NotImplementedError
+    )
 ```
 
 This test will fail if translation does not raise.
@@ -641,10 +653,6 @@ The majority of time should be spent in the `ExecuteIR` range. Within
 another `nvtx` range (e.g. `Scan.do_evaluate`, `GroupBy.do_evaluate`, etc.).
 These provide a higher-level grouping over the lower-level libcudf calls (e.g.
 `read_chunk`, `aggregate`).
-
-Finally, if using [rapidsmpf](https://docs.rapids.ai/api/rapidsmpf/nightly/)
-for shuffling, the methods inserting and extracting partitions to shuffle are
-annotated with nvtx ranges.
 
 # Query Plans
 

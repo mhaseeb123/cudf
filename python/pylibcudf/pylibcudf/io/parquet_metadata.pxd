@@ -9,6 +9,7 @@ from pylibcudf.libcudf.io.parquet_schema cimport (
     ColumnChunkMetaData as cpp_ColumnChunkMetaData,
     FileMetaData as cpp_FileMetaData,
     RowGroup as cpp_RowGroup,
+    SchemaElement as cpp_SchemaElement,
     SortingColumn as cpp_SortingColumn,
     Statistics as cpp_Statistics,
 )
@@ -33,7 +34,7 @@ cdef class ParquetColumnSchema:
 
     cpdef ParquetColumnSchema child(self, int idx)
 
-    cpdef list children(self)
+    cpdef list[ParquetColumnSchema] children(self)
 
     cpdef DataType cudf_type(self)
 
@@ -46,7 +47,7 @@ cdef class ParquetSchema:
 
     cpdef ParquetColumnSchema root(self)
 
-    cpdef dict column_types(self)
+    cpdef dict[str, DataType] column_types(self)
 
 
 cdef class ParquetMetadata:
@@ -63,17 +64,23 @@ cdef class ParquetMetadata:
 
     cpdef list[int] num_rowgroups_per_file(self)
 
-    cpdef dict metadata(self)
+    cpdef dict[str, str] metadata(self)
 
-    cpdef list rowgroup_metadata(self)
+    cpdef list[dict[str, int]] rowgroup_metadata(self)
 
-    cpdef dict columnchunk_metadata(self)
+    cpdef dict[str, list[int]] columnchunk_metadata(self)
 
 cdef class FileMetaData:
     cdef unique_ptr[cpp_FileMetaData] c_obj
 
     @staticmethod
     cdef FileMetaData from_libcudf(unique_ptr[cpp_FileMetaData] metadata)
+
+cdef class SchemaElement:
+    cdef cpp_SchemaElement c_obj
+
+    @staticmethod
+    cdef SchemaElement from_cpp(cpp_SchemaElement schema_element)
 
 cdef class SortingColumn:
     cdef cpp_SortingColumn c_obj
@@ -106,7 +113,7 @@ cdef class RowGroup:
     cdef RowGroup from_cpp(cpp_RowGroup row_group)
 
 cpdef ParquetMetadata read_parquet_metadata(SourceInfo src_info)
-cpdef list read_parquet_footers(SourceInfo src_info)
+cpdef list[FileMetaData] read_parquet_footers(SourceInfo src_info)
 cpdef Table read_parquet_column_chunk_bounds(
     object file_metadatas,
     object columns,
