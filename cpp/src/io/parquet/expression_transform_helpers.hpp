@@ -426,11 +426,15 @@ class equality_literals_collector : public parquet_expression_simplifier {
                               std::span<bool const> mismatched_timestamp_mask = {});
 
   /**
-   * @brief Vectors of equality literals in the AST expression, one per input table column
+   * @brief Returns vectors of collected literals and their comparison operators in the AST
+   * expression, one per input table column
    *
-   * @return Vectors of equality literals, one per input table column
+   * @return A pair of vectors of collected literals and their comparison operators, one per input
+   * table column
    */
-  [[nodiscard]] std::vector<std::vector<ast::literal*>> get_literals() &&;
+  [[nodiscard]] std::pair<std::vector<std::vector<ast::literal*>>,
+                          std::vector<std::vector<ast::ast_operator>>>
+  get_literals_and_operators() &&;
 
   /**
    * @brief Whether the membership filter built from the collected literals can prune anything
