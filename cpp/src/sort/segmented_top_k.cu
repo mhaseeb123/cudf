@@ -90,7 +90,7 @@ std::unique_ptr<column> sort_based_segmented_top_k_order(column_view const& col,
                                                          size_type k,
                                                          order topk_order,
                                                          cuda::stream_ref stream,
-                                                         memory_resources mr)
+                                                         cudf::memory_resources mr)
 {
   auto const size_data_type = data_type{type_to_id<size_type>()};
 
@@ -152,7 +152,7 @@ std::unique_ptr<column> cub_segmented_top_k_order(column_view const& col,
                                                   size_type k,
                                                   order topk_order,
                                                   cuda::stream_ref stream,
-                                                  memory_resources mr)
+                                                  cudf::memory_resources mr)
 {
   auto const num_segments = static_cast<size_type>(h_offsets.size()) - 1;
   auto const temp_mr      = mr.get_temporary_mr();
@@ -251,7 +251,7 @@ std::unique_ptr<column> segmented_top_k_order(column_view const& col,
                                               size_type k,
                                               order topk_order,
                                               cuda::stream_ref stream,
-                                              memory_resources mr)
+                                              cudf::memory_resources mr)
 {
   CUDF_EXPECTS(k >= 0, "k must be greater than or equal to 0", std::invalid_argument);
 
@@ -298,7 +298,7 @@ std::unique_ptr<column> segmented_top_k(column_view const& col,
                                         size_type k,
                                         order topk_order,
                                         cuda::stream_ref stream,
-                                        memory_resources mr)
+                                        cudf::memory_resources mr)
 {
   if (col.is_empty()) { return cudf::make_empty_column(col.type()); }
 
@@ -329,7 +329,7 @@ std::unique_ptr<column> segmented_top_k(column_view const& col,
                                         size_type k,
                                         order topk_order,
                                         cuda::stream_ref stream,
-                                        memory_resources mr)
+                                        cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   return detail::segmented_top_k(col, segment_offsets, k, topk_order, stream, mr);
@@ -340,7 +340,7 @@ std::unique_ptr<column> segmented_top_k_order(column_view const& col,
                                               size_type k,
                                               order topk_order,
                                               cuda::stream_ref stream,
-                                              memory_resources mr)
+                                              cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
   return detail::segmented_top_k_order(col, segment_offsets, k, topk_order, stream, mr);
