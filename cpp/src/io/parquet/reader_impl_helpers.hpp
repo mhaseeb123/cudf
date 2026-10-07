@@ -14,8 +14,8 @@
 #include <cudf/io/parquet_schema.hpp>
 #include <cudf/types.hpp>
 
-#include <thrust/host_vector.h>
 #include <cuda/buffer>
+#include <thrust/host_vector.h>
 
 #include <algorithm>
 #include <exception>
