@@ -418,8 +418,7 @@ std::unique_ptr<column> top_k_order(
  * Returns the top k values (largest or smallest) within each segment of the given column.
  * The values within each segment may not necessarily be sorted.
  * If a segment contain less than k elements then all values for that segment are returned.
- * When several rows of a segment hold the same value at the k boundary, which of them are
- * selected is unspecified; the returned values are the same either way.
+ * Ties at the k boundary may select any of the tied rows.
  *
  * @code{.pseudo}
  * Example:
@@ -467,8 +466,7 @@ std::unique_ptr<column> segmented_top_k(
  * The indices will represent the top k elements within each segment but may not represent
  * those elements as k sorted values.
  * If a segment contain less than k elements then all values for that segment are returned.
- * When several rows of a segment hold the same value at the k boundary, which of their
- * indices are selected, and the order of indices of equal values, is unspecified.
+ * Ties at the k boundary may select any of the tied rows, in any order.
  *
  * @code{.pseudo}
  * Example:

@@ -4,7 +4,7 @@
  */
 
 #include "sort.hpp"
-#include "top_k.cuh"
+#include "top_k_dispatch.cuh"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
@@ -31,54 +31,47 @@
 namespace cudf {
 namespace detail {
 namespace {
-struct dispatch_topk_fn {
-  column_view input;
-  size_type k;
-  order topk_order;
-  cuda::stream_ref stream;
-  cudf::memory_resources mr;
+/**
+ * @brief Computes the top-k indices of `col` with `cub::DeviceTopK`
+ */
+template <typename T>
+std::unique_ptr<column> cub_top_k_order(column_view const& col,
+                                        size_type k,
+                                        order topk_order,
+                                        cuda::stream_ref stream,
+                                        cudf::memory_resources mr)
+{
+  auto requirements = cuda::execution::require(cuda::execution::determinism::not_guaranteed,
+                                               cuda::execution::output_ordering::unsorted);
+  auto env          = cuda::std::execution::env{cuda::stream_ref{stream.get()}, requirements};
+  auto tmp_size     = std::size_t{0};
+  auto const size   = col.size();
 
-  template <typename T>
-  std::unique_ptr<column> top_k()
-  {
-    auto requirements = cuda::execution::require(cuda::execution::determinism::not_guaranteed,
-                                                 cuda::execution::output_ordering::unsorted);
-    auto env          = cuda::std::execution::env{cuda::stream_ref{stream.get()}, requirements};
-    auto tmp_size     = std::size_t{0};
-    auto const size   = input.size();
+  auto keys_in  = col.begin<T>();
+  auto keys_out = cuda::make_discard_iterator();
+  auto indices  = rmm::device_uvector<size_type>(k, stream, mr.get_output_mr());
+  auto vals_in  = cuda::counting_iterator<size_type>();
+  auto vals_out = indices.begin();
 
-    auto keys_in  = input.begin<T>();
-    auto keys_out = cuda::make_discard_iterator();
-    auto indices  = rmm::device_uvector<size_type>(k, stream, mr.get_output_mr());
-    auto vals_in  = cuda::counting_iterator<size_type>();
-    auto vals_out = indices.begin();
-
-    if (topk_order == order::ASCENDING) {
-      CUDF_CUDA_TRY(cub::DeviceTopK::MinPairs(
-        nullptr, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
-      auto tmp =
-        cuda::device_buffer<std::byte>(stream, mr.get_temporary_mr(), tmp_size, cuda::no_init);
-      CUDF_CUDA_TRY(cub::DeviceTopK::MinPairs(
-        tmp.data(), tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
-    } else {
-      CUDF_CUDA_TRY(cub::DeviceTopK::MaxPairs(
-        nullptr, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
-      auto tmp =
-        cuda::device_buffer<std::byte>(stream, mr.get_temporary_mr(), tmp_size, cuda::no_init);
-      CUDF_CUDA_TRY(cub::DeviceTopK::MaxPairs(
-        tmp.data(), tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
-    }
-
-    return std::make_unique<column>(
-      std::move(indices), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
+  if (topk_order == order::ASCENDING) {
+    CUDF_CUDA_TRY(cub::DeviceTopK::MinPairs(
+      nullptr, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
+    auto tmp =
+      cuda::device_buffer<std::byte>(stream, mr.get_temporary_mr(), tmp_size, cuda::no_init);
+    CUDF_CUDA_TRY(cub::DeviceTopK::MinPairs(
+      tmp.data(), tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
+  } else {
+    CUDF_CUDA_TRY(cub::DeviceTopK::MaxPairs(
+      nullptr, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
+    auto tmp =
+      cuda::device_buffer<std::byte>(stream, mr.get_temporary_mr(), tmp_size, cuda::no_init);
+    CUDF_CUDA_TRY(cub::DeviceTopK::MaxPairs(
+      tmp.data(), tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
   }
 
-  template <typename T>
-  std::unique_ptr<column> operator()()
-  {
-    return top_k<T>();
-  }
-};
+  return std::make_unique<column>(
+    std::move(indices), cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED), 0);
+}
 
 }  // namespace
 
@@ -96,9 +89,9 @@ std::unique_ptr<column> top_k(column_view const& col,
     auto const temp_mr = mr.get_temporary_mr();
     if (is_cub_top_k_supported(col)) {
       return type_dispatcher<dispatch_storage_type>(
-        col.type(),
-        dispatch_cub_top_k_key{
-          dispatch_topk_fn{col, k, topk_order, stream, memory_resources{temp_mr, temp_mr}}});
+        col.type(), dispatch_cub_top_k_key{[&]<typename T>() {
+          return cub_top_k_order<T>(col, k, topk_order, stream, memory_resources{temp_mr, temp_mr});
+        }});
     }
     auto const nulls = topk_order == order::ASCENDING ? null_order::AFTER : null_order::BEFORE;
     return sorted_order<sort_method::STABLE>(col, topk_order, nulls, stream, temp_mr);
@@ -130,7 +123,9 @@ std::unique_ptr<column> top_k_order(column_view const& col,
 
   if (is_cub_top_k_supported(col)) {
     return type_dispatcher<dispatch_storage_type>(
-      col.type(), dispatch_cub_top_k_key{dispatch_topk_fn{col, k, topk_order, stream, mr}});
+      col.type(), dispatch_cub_top_k_key{[&]<typename T>() {
+        return cub_top_k_order<T>(col, k, topk_order, stream, mr);
+      }});
   }
   auto const nulls = topk_order == order::ASCENDING ? null_order::AFTER : null_order::BEFORE;
   auto indices =

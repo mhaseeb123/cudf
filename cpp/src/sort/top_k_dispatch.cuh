@@ -17,7 +17,7 @@ namespace detail {
 /**
  * @brief Returns true if the top-k of `col` can be selected with `cub::DeviceTopK`
  */
-inline bool is_cub_top_k_supported(column_view const& col)
+[[nodiscard]] inline bool is_cub_top_k_supported(column_view const& col)
 {
   return not col.has_nulls() and cudf::is_fixed_width(col.type()) and
          not cudf::is_floating_point(col.type());  // needs special NaN handling

@@ -4,7 +4,7 @@
  */
 
 #include "sort.hpp"
-#include "top_k.cuh"
+#include "top_k_dispatch.cuh"
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_factories.hpp>
