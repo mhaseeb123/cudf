@@ -33,16 +33,43 @@
 #include <thrust/binary_search.h>
 #include <thrust/execution_policy.h>
 #include <thrust/remove.h>
-#include <thrust/scan.h>
 #include <thrust/sequence.h>
 
 #include <algorithm>
+#include <functional>
+#include <numeric>
+#include <ranges>
 #include <span>
 #include <vector>
 
 namespace cudf {
 namespace detail {
 namespace {
+
+/**
+ * @brief Returns whether CUB-based path is optimal for the specified number of rows, number of
+ * segments, and `k`
+ */
+constexpr bool use_cub_based_segmented_top_k(size_type num_rows,
+                                             size_type num_segments,
+                                             size_type k)
+{
+  // Empirically measured limits for optimal CUB-based dispatch
+
+  // Max number of segments for optimal CUB-based dispatch
+  constexpr size_type max_segments = 64;
+  // Min average segment size for optimal CUB-based dispatch
+  constexpr size_type min_avg_segment_size = 16'384;
+  // Max k, as 1/N of the average segment size, for optimal CUB-based dispatch
+  constexpr size_type max_k_fraction = 8;
+
+  // Check if number of segments is out of range
+  if (num_segments <= 0 or num_segments > max_segments) { return false; }
+
+  auto const avg_segment_size = num_rows / num_segments;
+  return cuda::std::cmp_greater_equal(avg_segment_size, min_avg_segment_size) and
+         cuda::std::cmp_less_equal(k, avg_segment_size / max_k_fraction);
+}
 
 /**
  * @brief Resolves the k indices per segment
@@ -84,7 +111,9 @@ CUDF_KERNEL void resolve_segment_indices(device_span<size_type const> d_offsets,
   }
 }
 
-/** @brief Computes top-k indices per segment using a full segmented sort. */
+/**
+ * @brief Computes top-k indices per segment with a full segmented sort
+ */
 std::unique_ptr<column> sort_based_segmented_top_k_order(column_view const& col,
                                                          column_view const& segment_offsets,
                                                          size_type k,
@@ -127,71 +156,53 @@ std::unique_ptr<column> sort_based_segmented_top_k_order(column_view const& col,
                            cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED));
 }
 
-// Limits for the per-segment `cub::DeviceTopK` path, from crossover measurements against the
-// segmented sort (see #23602). Each segment costs a host-launched DeviceTopK call.
-constexpr size_type cub_max_segments = 64;
-// Below this average segment size the segmented sort is faster.
-constexpr size_type cub_min_avg_segment_size = 16384;
-// As k approaches the segment size, sorting the selection approaches the full segmented sort.
-constexpr size_type cub_max_k_fraction = 8;
-
-/** @brief Returns true if `num_segments` segments covering `num_rows` rows favor DeviceTopK */
-constexpr bool use_cub_segmented_top_k(size_type num_rows, size_type num_segments, size_type k)
-{
-  auto const avg_segment_size = num_rows / num_segments;
-  return avg_segment_size >= cub_min_avg_segment_size && k <= avg_segment_size / cub_max_k_fraction;
-}
-
 /**
  * @brief Computes top-k indices per segment with one `cub::DeviceTopK` call per segment
  */
 template <typename T>
-std::unique_ptr<column> cub_segmented_top_k_order(column_view const& col,
-                                                  column_view const& segment_offsets,
-                                                  std::span<size_type const> h_offsets,
-                                                  size_type k,
-                                                  order topk_order,
-                                                  cuda::stream_ref stream,
-                                                  cudf::memory_resources mr)
+std::unique_ptr<column> cub_based_segmented_top_k_order(column_view const& col,
+                                                        std::span<size_type const> h_offsets,
+                                                        size_type k,
+                                                        order topk_order,
+                                                        cuda::stream_ref stream,
+                                                        cudf::memory_resources mr)
 {
   auto const num_segments = static_cast<size_type>(h_offsets.size()) - 1;
   auto const temp_mr      = mr.get_temporary_mr();
 
-  // Each segment keeps min(size, k) rows. The output offsets are also scanned on device to
-  // avoid a host-to-device copy; the host copy only locates each segment's output.
-  auto h_out_offsets    = std::vector<size_type>(num_segments + 1, 0);
-  auto max_segment_size = size_type{0};
-  for (size_type i = 0; i < num_segments; ++i) {
-    auto const size      = h_offsets[i + 1] - h_offsets[i];
-    h_out_offsets[i + 1] = h_out_offsets[i] + cuda::std::min(size, k);
-    max_segment_size     = cuda::std::max(max_segment_size, size);
-  }
-  auto offsets         = make_numeric_column(data_type{type_to_id<size_type>()},
-                                     num_segments + 1,
-                                     mask_state::UNALLOCATED,
-                                     stream,
-                                     mr.get_output_mr());
-  auto const out_sizes = cuda::make_transform_iterator(
-    cuda::counting_iterator<size_type>{0},
-    [d_offsets = segment_offsets.begin<size_type>(), num_segments, k] __device__(
-      size_type i) -> size_type {
-      return i < num_segments ? cuda::std::min(d_offsets[i + 1] - d_offsets[i], k) : 0;
-    });
-  thrust::exclusive_scan(rmm::exec_policy_nosync(stream, temp_mr),
-                         out_sizes,
-                         out_sizes + num_segments + 1,
-                         offsets->mutable_view().begin<size_type>());
+  // Segment indices and sizes
+  auto const segments     = std::views::iota(size_type{0}, num_segments);
+  auto const segment_size = [&](size_type segment_idx) {
+    return h_offsets[segment_idx + 1] - h_offsets[segment_idx];
+  };
+  auto const max_segment_size = std::ranges::max(segments | std::views::transform(segment_size));
 
-  auto indices = rmm::device_uvector<size_type>(h_out_offsets.back(), stream, temp_mr);
+  // Compute output offsets and indices
+  auto host_offsets = cudf::detail::make_pinned_vector_async<size_type>(num_segments + 1, stream);
+  host_offsets.front() = 0;
+  std::transform_inclusive_scan(
+    segments.begin(),
+    segments.end(),
+    host_offsets.begin() + 1,
+    std::plus{},
+    [&](auto const segment_idx) { return std::min(segment_size(segment_idx), k); });
+
+  auto offsets = std::make_unique<column>(
+    cudf::detail::make_device_uvector_async(host_offsets, stream, mr.get_output_mr()),
+    cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
+    0);
+  auto indices = rmm::device_uvector<size_type>(host_offsets.back(), stream, temp_mr);
 
   auto requirements = cuda::execution::require(cuda::execution::determinism::not_guaranteed,
                                                cuda::execution::output_ordering::unsorted);
   auto env          = cuda::std::execution::env{stream, requirements};
-  auto select_top_k = [&](void* tmp, std::size_t& tmp_size, size_type i, size_type size) {
-    auto const keys_in  = col.begin<T>() + h_offsets[i];
+
+  auto select_top_k = [&](void* tmp, std::size_t& tmp_size, size_type segment_idx, size_type size) {
+    auto const keys_in  = col.begin<T>() + h_offsets[segment_idx];
     auto const keys_out = cuda::make_discard_iterator();
-    auto const vals_in  = cuda::counting_iterator<size_type>{h_offsets[i]};
-    auto const vals_out = indices.data() + h_out_offsets[i];
+    auto const vals_in  = cuda::counting_iterator<size_type>{h_offsets[segment_idx]};
+    auto const vals_out = indices.data() + host_offsets[segment_idx];
+
     if (topk_order == order::ASCENDING) {
       return cub::DeviceTopK::MinPairs(
         tmp, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env);
@@ -205,18 +216,18 @@ std::unique_ptr<column> cub_segmented_top_k_order(column_view const& col,
   if (max_segment_size > k) { CUDF_CUDA_TRY(select_top_k(nullptr, tmp_size, 0, max_segment_size)); }
   auto tmp = cuda::device_buffer<std::byte>(stream, temp_mr, tmp_size, cuda::no_init);
 
-  for (size_type i = 0; i < num_segments; ++i) {
-    auto const size = h_offsets[i + 1] - h_offsets[i];
+  for (auto const segment_idx : segments) {
+    auto const size = segment_size(segment_idx);
     if (size == 0) { continue; }
     if (size <= k) {
       thrust::sequence(rmm::exec_policy_nosync(stream, temp_mr),
-                       indices.begin() + h_out_offsets[i],
-                       indices.begin() + h_out_offsets[i + 1],
-                       h_offsets[i]);
+                       indices.begin() + host_offsets[segment_idx],
+                       indices.begin() + host_offsets[segment_idx + 1],
+                       h_offsets[segment_idx]);
       continue;
     }
     auto segment_tmp_size = tmp_size;
-    CUDF_CUDA_TRY(select_top_k(tmp.data(), segment_tmp_size, i, size));
+    CUDF_CUDA_TRY(select_top_k(tmp.data(), segment_tmp_size, segment_idx, size));
   }
 
   // Sort each segment's selection by value to match the sort-based path.
@@ -253,8 +264,7 @@ std::unique_ptr<column> segmented_top_k_order(column_view const& col,
                                               cuda::stream_ref stream,
                                               cudf::memory_resources mr)
 {
-  CUDF_EXPECTS(k >= 0, "k must be greater than or equal to 0", std::invalid_argument);
-
+  CUDF_EXPECTS(k >= 0, "k must be non-negative", std::invalid_argument);
   auto const size_data_type = data_type{type_to_id<size_type>()};
   if (k == 0 || col.is_empty()) { return cudf::make_empty_lists_column(size_data_type); }
 
@@ -272,8 +282,7 @@ std::unique_ptr<column> segmented_top_k_order(column_view const& col,
   // `col.size()` bounds the rows covered by the segments, so this check avoids copying the
   // offsets to host for inputs that cannot take the DeviceTopK path.
   if (auto const num_segments = segment_offsets.size() - 1;
-      is_cub_top_k_supported(col) and num_segments > 0 and num_segments <= cub_max_segments and
-      use_cub_segmented_top_k(col.size(), num_segments, k)) {
+      is_cub_top_k_supported(col) and use_cub_based_segmented_top_k(col.size(), num_segments, k)) {
     auto const h_offsets = cudf::detail::make_pinned_vector(
       device_span<size_type const>{segment_offsets.begin<size_type>(),
                                    static_cast<std::size_t>(num_segments) + 1},
@@ -281,11 +290,11 @@ std::unique_ptr<column> segmented_top_k_order(column_view const& col,
     // Malformed offsets keep the sort-based path's failure behavior.
     if (h_offsets.front() >= 0 && h_offsets.back() <= col.size() &&
         cuda::std::is_sorted(h_offsets.begin(), h_offsets.end()) and
-        use_cub_segmented_top_k(h_offsets.back() - h_offsets.front(), num_segments, k)) {
+        use_cub_based_segmented_top_k(h_offsets.back() - h_offsets.front(), num_segments, k)) {
       return type_dispatcher<dispatch_storage_type>(
         col.type(), dispatch_cub_top_k_key{[&]<typename T>() {
-          return cub_segmented_top_k_order<T>(
-            col, segment_offsets, {h_offsets.data(), h_offsets.size()}, k, topk_order, stream, mr);
+          return cub_based_segmented_top_k_order<T>(
+            col, {h_offsets.data(), h_offsets.size()}, k, topk_order, stream, mr);
         }});
     }
   }

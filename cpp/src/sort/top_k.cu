@@ -31,11 +31,12 @@
 namespace cudf {
 namespace detail {
 namespace {
+
 /**
  * @brief Computes the top-k indices of `col` with `cub::DeviceTopK`
  */
 template <typename T>
-std::unique_ptr<column> cub_top_k_order(column_view const& col,
+std::unique_ptr<column> cub_top_k_order(column_view const& input,
                                         size_type k,
                                         order topk_order,
                                         cuda::stream_ref stream,
@@ -45,9 +46,9 @@ std::unique_ptr<column> cub_top_k_order(column_view const& col,
                                                cuda::execution::output_ordering::unsorted);
   auto env          = cuda::std::execution::env{cuda::stream_ref{stream.get()}, requirements};
   auto tmp_size     = std::size_t{0};
-  auto const size   = col.size();
+  auto const size   = input.size();
 
-  auto keys_in  = col.begin<T>();
+  auto keys_in  = input.begin<T>();
   auto keys_out = cuda::make_discard_iterator();
   auto indices  = rmm::device_uvector<size_type>(k, stream, mr.get_output_mr());
   auto vals_in  = cuda::counting_iterator<size_type>();
