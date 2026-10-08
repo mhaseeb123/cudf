@@ -8,6 +8,7 @@
 #include "tests/io/parquet_common.hpp"
 
 #include <cudf_test/base_fixture.hpp>
+#include <cudf_test/column_utilities.hpp>
 #include <cudf_test/column_wrapper.hpp>
 #include <cudf_test/table_utilities.hpp>
 
@@ -610,25 +611,40 @@ TEST_F(HybridScanMultifileTest, ReadColumnsFromMismatchedSchemas)
     CUDF_TEST_EXPECT_TABLES_EQUAL(expected.tbl->view(), result.tbl->view());
   }
 
-  // Two step materialize with hybrid scan
+  // Two step materialize with hybrid scan, pruning pages with per-source mapped page indexes
   {
-    auto literal_value = cudf::numeric_scalar<int64_t>(std::numeric_limits<int64_t>::min());
+    auto literal_value = cudf::numeric_scalar<int64_t>(-50);
     auto literal       = cudf::ast::literal(literal_value);
     auto col_ref       = cudf::ast::column_name_reference("col0");
-    auto filter = cudf::ast::operation(cudf::ast::ast_operator::GREATER_EQUAL, col_ref, literal);
+    auto filter        = cudf::ast::operation(cudf::ast::ast_operator::LESS, col_ref, literal);
 
     options.set_filter(filter);
     reader.reset_column_selection();
 
-    auto row_mask      = reader.build_all_true_row_mask(row_groups, stream, mr);
+    auto const expected_filtered =
+      cudf::io::read_parquet(cudf::io::parquet_reader_options::builder(source_info)
+                               .allow_mismatched_pq_schemas(true)
+                               .column_names({"col0", "col1", "col2"})
+                               .filter(filter)
+                               .build(),
+                             stream,
+                             mr);
+
+    setup_page_indexes(reader, inputs);
+    auto row_mask = reader.build_row_mask_with_page_index_stats(row_groups, options, stream, mr);
     auto row_mask_view = row_mask->mutable_view();
+
+    // `col0` is ascending in [-100, 99], so only the first 5 of the 20 pages in each source can
+    // satisfy `col0 < -50`
+    EXPECT_EQ(std::ranges::count(cudf::test::to_host<bool>(row_mask->view()).first, true),
+              2 * page_size_for_ordered_tests);
 
     auto filter_column_chunks = fetch_multisource_device_data(
       inputs, reader.filter_column_chunks_byte_ranges(row_groups, options), stream, mr);
     auto const filter_result = reader.materialize_filter_columns(row_groups,
                                                                  filter_column_chunks.flat_spans,
                                                                  row_mask_view,
-                                                                 use_data_page_mask::NO,
+                                                                 use_data_page_mask::YES,
                                                                  options,
                                                                  stream,
                                                                  mr);
@@ -638,13 +654,15 @@ TEST_F(HybridScanMultifileTest, ReadColumnsFromMismatchedSchemas)
     auto const payload_result = reader.materialize_payload_columns(row_groups,
                                                                    payload_column_chunks.flat_spans,
                                                                    row_mask_view,
-                                                                   use_data_page_mask::NO,
+                                                                   use_data_page_mask::YES,
                                                                    options,
                                                                    stream,
                                                                    mr);
 
-    CUDF_TEST_EXPECT_TABLES_EQUAL(expected.tbl->select({0}), filter_result.tbl->view());
-    CUDF_TEST_EXPECT_TABLES_EQUAL(expected.tbl->select({1, 2}), payload_result.tbl->view());
+    CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_filtered.tbl->select({0}),
+                                       filter_result.tbl->view());
+    CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected_filtered.tbl->select({1, 2}),
+                                       payload_result.tbl->view());
   }
 }
 
