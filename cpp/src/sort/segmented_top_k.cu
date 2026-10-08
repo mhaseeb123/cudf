@@ -136,7 +136,7 @@ top_k_method select_top_k_method(column_view const& col,
 
   auto const d_offsets = segment_offsets.begin<size_type>();
   auto const stats     = thrust::transform_reduce(
-    rmm::exec_policy(stream, temp_mr),
+    rmm::exec_policy_nosync(stream, temp_mr),
     cuda::counting_iterator<size_type>{0},
     cuda::counting_iterator<size_type>{num_segments},
     [d_offsets] __device__(size_type i) -> segment_stats {
