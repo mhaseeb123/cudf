@@ -28,11 +28,11 @@
 #include <cub/device/device_topk.cuh>
 #include <cuda/argument>
 #include <cuda/iterator>
+#include <cuda/std/algorithm>
 #include <cuda/std/execution>
 #include <cuda/std/iterator>
 #include <cuda/std/limits>
 #include <cuda/stream>
-#include <thrust/binary_search.h>
 #include <thrust/execution_policy.h>
 #include <thrust/remove.h>
 #include <thrust/sequence.h>
@@ -56,26 +56,29 @@ enum class top_k_method : int8_t {
 
 /**
  * @brief Limits for using CUB instead of the segmented sort
+ *
+ * @note These limits are tuned for H100 GPU. See discussion on PR #23602.
+ *
+ * TODO: Replace the three way method selection with cub::DeviceSegmentedTopK
+ * (https://github.com/NVIDIA/cccl/issues/6391) when it is available
  */
 struct cub_limits {
   /**
    * @brief Constructs the limits for keys of `key_size` bytes
    */
   explicit constexpr cub_limits(std::size_t key_size)
-    : min_num_rows{key_size <= sizeof(int32_t) ? 262'144 : 1'048'576},
-      max_segment_size{key_size <= sizeof(int32_t) ? 4'096 : 2'048},
-      k_divisor{key_size <= sizeof(int32_t) ? 4 : 8},
-      segments_min_avg_size{key_size <= sizeof(int32_t) ? 65'536 : 131'072},
-      segments_k_divisor{key_size <= sizeof(int32_t) ? 8 : 32}
+    : min_num_rows{key_size <= sizeof(int32_t) ? 1 << 18 : 1 << 22},
+      max_segment_size{key_size <= sizeof(int32_t) ? 1 << 12 : 1 << 11},
+      segments_min_avg_size{key_size <= sizeof(int32_t) ? 1 << 17 : 1 << 20}
   {
   }
 
   size_type min_num_rows;      ///< `CUB_BATCHED`: Minimum number of rows in all segments
   size_type max_segment_size;  ///< `CUB_BATCHED`: Maximum segment size (one thread block each)
-  size_type min_avg_segment_size{256};  ///< `CUB_BATCHED`: Minimum average segment size
-  size_type k_divisor;  ///< `CUB_BATCHED`: `k` at most the average segment size divided by this
-  size_type segments_min_avg_size;  ///< `CUB_SEGMENTS`: Minimum average segment size
-  size_type segments_k_divisor;     ///< `CUB_SEGMENTS`: `k` at most the average segment size / this
+  size_type min_avg_segment_size{1 << 8};  ///< `CUB_BATCHED`: Minimum average segment size
+  size_type k_divisor{8};  ///< `CUB_BATCHED`: `k` at most the average segment size divided by this
+  size_type segments_min_avg_size;   ///< `CUB_SEGMENTS`: Minimum average segment size
+  size_type segments_k_divisor{32};  ///< `CUB_SEGMENTS`: `k` at most the average size / this
 };
 
 /**
@@ -182,7 +185,7 @@ CUDF_KERNEL void resolve_segment_indices(device_span<size_type const> d_offsets,
   auto const tid = cudf::detail::grid_1d::global_thread_id();
   if (tid >= d_indices.size()) { return; }
 
-  auto const sitr = thrust::upper_bound(thrust::seq, d_offsets.begin(), d_offsets.end(), tid);
+  auto const sitr = cuda::std::upper_bound(d_offsets.begin(), d_offsets.end(), tid);
   // Mark rows outside all segments for removal (offsets need not cover all rows).
   if (sitr == d_offsets.begin() || sitr == d_offsets.end()) {
     d_indices[tid] = -1;
@@ -327,6 +330,16 @@ std::unique_ptr<column> cub_per_segment_top_k_order(column_view const& col,
 }
 
 /**
+ * @brief Returns the size of segment `i`
+ *
+ * Needed to supply a random-access iterator to `cuda::args::deferred_sequence`
+ */
+struct segment_size_fn {
+  size_type const* d_offsets;
+  __device__ size_type operator()(size_type i) const { return d_offsets[i + 1] - d_offsets[i]; }
+};
+
+/**
  * @brief Computes top-k indices of all segments with single `cub::DeviceBatchedTopK` call
  */
 template <typename T>
@@ -371,9 +384,7 @@ std::unique_ptr<column> cub_batched_segmented_top_k_order(column_view const& col
     segments, [out = indices.data(), d_out_offsets] __device__(size_type i) -> size_type* {
       return out + d_out_offsets[i];
     });
-  auto const sizes = cuda::make_transform_iterator(
-    segments,
-    [d_offsets] __device__(size_type i) -> size_type { return d_offsets[i + 1] - d_offsets[i]; });
+  auto const sizes = cuda::make_transform_iterator(segments, segment_size_fn{d_offsets});
 
   auto const segment_sizes = cuda::args::deferred_sequence{
     sizes, cuda::args::bounds<0, cub_limits{sizeof(T)}.max_segment_size>()};

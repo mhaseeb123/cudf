@@ -501,8 +501,8 @@ TYPED_TEST(TopKSegmentedLarge, TopKSegmented)
   constexpr cudf::size_type slice_offset = 2;
 
   // {number of segments, segment size}
-  for (auto const& shape : {std::pair<cudf::size_type, cudf::size_type>{1024, 1024},
-                            std::pair<cudf::size_type, cudf::size_type>{4, 262'144}}) {
+  for (auto const& shape : {std::pair<cudf::size_type, cudf::size_type>{1 << 12, 1 << 10},
+                            std::pair<cudf::size_type, cudf::size_type>{4, 1 << 21}}) {
     auto const [num_segments, segment_size] = shape;
     auto const num_rows                     = 2 * uncovered + num_segments * segment_size + (k - 1);
 
