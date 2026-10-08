@@ -25,7 +25,6 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_topk.cuh>
-#include <cuda/buffer>
 #include <cuda/iterator>
 #include <cuda/std/execution>
 #include <cuda/std/iterator>
@@ -175,7 +174,6 @@ std::unique_ptr<column> cub_based_segmented_top_k_order(column_view const& col,
   auto const segment_size = [&](size_type segment_idx) {
     return h_offsets[segment_idx + 1] - h_offsets[segment_idx];
   };
-  auto const max_segment_size = std::ranges::max(segments | std::views::transform(segment_size));
 
   // Compute output offsets and indices
   auto host_offsets = cudf::detail::make_pinned_vector_async<size_type>(num_segments + 1, stream);
@@ -188,33 +186,27 @@ std::unique_ptr<column> cub_based_segmented_top_k_order(column_view const& col,
     [&](auto const segment_idx) { return std::min(segment_size(segment_idx), k); });
 
   auto offsets = std::make_unique<column>(
-    cudf::detail::make_device_uvector_async(host_offsets, stream, mr.get_output_mr()),
+    cudf::detail::make_device_uvector(host_offsets, stream, mr.get_output_mr()),
     cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED),
     0);
   auto indices = rmm::device_uvector<size_type>(host_offsets.back(), stream, temp_mr);
 
-  auto requirements = cuda::execution::require(cuda::execution::determinism::not_guaranteed,
-                                               cuda::execution::output_ordering::unsorted);
-  auto env          = cuda::std::execution::env{stream, requirements};
+  auto const requirements = cuda::execution::require(cuda::execution::determinism::not_guaranteed,
+                                                     cuda::execution::output_ordering::unsorted);
+  auto const mr_prop      = cuda::std::execution::prop{cuda::mr::get_memory_resource, temp_mr};
+  auto const env          = cuda::std::execution::env{stream, requirements, mr_prop};
 
-  auto select_top_k = [&](void* tmp, std::size_t& tmp_size, size_type segment_idx, size_type size) {
+  auto select_top_k = [&](size_type segment_idx, size_type size) {
     auto const keys_in  = col.begin<T>() + h_offsets[segment_idx];
     auto const keys_out = cuda::make_discard_iterator();
     auto const vals_in  = cuda::counting_iterator<size_type>{h_offsets[segment_idx]};
     auto const vals_out = indices.data() + host_offsets[segment_idx];
 
     if (topk_order == order::ASCENDING) {
-      return cub::DeviceTopK::MinPairs(
-        tmp, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env);
+      return cub::DeviceTopK::MinPairs(keys_in, keys_out, vals_in, vals_out, size, k, env);
     }
-    return cub::DeviceTopK::MaxPairs(
-      tmp, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env);
+    return cub::DeviceTopK::MaxPairs(keys_in, keys_out, vals_in, vals_out, size, k, env);
   };
-
-  // Temporary storage grows with the segment size, so the largest segment sizes it for all.
-  auto tmp_size = std::size_t{0};
-  if (max_segment_size > k) { CUDF_CUDA_TRY(select_top_k(nullptr, tmp_size, 0, max_segment_size)); }
-  auto tmp = cuda::device_buffer<std::byte>(stream, temp_mr, tmp_size, cuda::no_init);
 
   for (auto const segment_idx : segments) {
     auto const size = segment_size(segment_idx);
@@ -226,8 +218,7 @@ std::unique_ptr<column> cub_based_segmented_top_k_order(column_view const& col,
                        h_offsets[segment_idx]);
       continue;
     }
-    auto segment_tmp_size = tmp_size;
-    CUDF_CUDA_TRY(select_top_k(tmp.data(), segment_tmp_size, segment_idx, size));
+    CUDF_CUDA_TRY(select_top_k(segment_idx, size));
   }
 
   // Sort each segment's selection by value to match the sort-based path.

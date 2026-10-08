@@ -23,7 +23,6 @@
 #include <rmm/exec_policy.hpp>
 
 #include <cub/device/device_topk.cuh>
-#include <cuda/buffer>
 #include <cuda/iterator>
 #include <cuda/std/execution>
 #include <cuda/stream>
@@ -42,11 +41,11 @@ std::unique_ptr<column> cub_top_k_order(column_view const& input,
                                         cuda::stream_ref stream,
                                         cudf::memory_resources mr)
 {
-  auto requirements = cuda::execution::require(cuda::execution::determinism::not_guaranteed,
-                                               cuda::execution::output_ordering::unsorted);
-  auto env          = cuda::std::execution::env{cuda::stream_ref{stream.get()}, requirements};
-  auto tmp_size     = std::size_t{0};
-  auto const size   = input.size();
+  auto const requirements = cuda::execution::require(cuda::execution::determinism::not_guaranteed,
+                                                     cuda::execution::output_ordering::unsorted);
+  auto const mr_prop =
+    cuda::std::execution::prop{cuda::mr::get_memory_resource, mr.get_temporary_mr()};
+  auto const env = cuda::std::execution::env{cuda::stream_ref{stream.get()}, requirements, mr_prop};
 
   auto keys_in  = input.begin<T>();
   auto keys_out = cuda::make_discard_iterator();
@@ -55,19 +54,11 @@ std::unique_ptr<column> cub_top_k_order(column_view const& input,
   auto vals_out = indices.begin();
 
   if (topk_order == order::ASCENDING) {
-    CUDF_CUDA_TRY(cub::DeviceTopK::MinPairs(
-      nullptr, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
-    auto tmp =
-      cuda::device_buffer<std::byte>(stream, mr.get_temporary_mr(), tmp_size, cuda::no_init);
-    CUDF_CUDA_TRY(cub::DeviceTopK::MinPairs(
-      tmp.data(), tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
+    CUDF_CUDA_TRY(
+      cub::DeviceTopK::MinPairs(keys_in, keys_out, vals_in, vals_out, input.size(), k, env));
   } else {
-    CUDF_CUDA_TRY(cub::DeviceTopK::MaxPairs(
-      nullptr, tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
-    auto tmp =
-      cuda::device_buffer<std::byte>(stream, mr.get_temporary_mr(), tmp_size, cuda::no_init);
-    CUDF_CUDA_TRY(cub::DeviceTopK::MaxPairs(
-      tmp.data(), tmp_size, keys_in, keys_out, vals_in, vals_out, size, k, env));
+    CUDF_CUDA_TRY(
+      cub::DeviceTopK::MaxPairs(keys_in, keys_out, vals_in, vals_out, input.size(), k, env));
   }
 
   return std::make_unique<column>(
