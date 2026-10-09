@@ -23,6 +23,7 @@
 #include <cudf/detail/utilities/integer_utils.hpp>
 #include <cudf/detail/utilities/stream_pool.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
+#include <cudf/logger.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/utilities/bit.hpp>
 #include <cudf/utilities/memory_resource.hpp>
@@ -55,8 +56,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <functional>
 #include <numeric>
+#include <optional>
+#include <string>
 #include <tuple>
 #include <utility>
 
@@ -396,12 +400,9 @@ void persisted_statistics::persist(uint64_t num_table_rows,
                                    intermediate_statistics&& intermediate_stats,
                                    cuda::stream_ref stream)
 {
-  col_types = std::move(intermediate_stats.col_types);
-  num_rows += num_table_rows;
-  if (num_table_rows == 0) { return; }
-  stats_dtypes = std::move(intermediate_stats.stats_dtypes);
-
-  if (write_mode == single_write_mode::NO) {
+  // Allocate before modifying any state
+  std::optional<rmm::device_uvector<char>> string_pool;
+  if (num_table_rows > 0 and write_mode == single_write_mode::NO) {
     // persist the strings in the chunks into a string pool and update pointers
     auto const num_chunks = static_cast<int>(intermediate_stats.stripe_stat_chunks.size());
     // min offset and max offset + 1 for total size
@@ -420,22 +421,27 @@ void persisted_statistics::persist(uint64_t num_table_rows,
     // pull size back to host
     auto const total_string_pool_size = offsets.element(num_chunks * 2, stream);
     if (total_string_pool_size > 0) {
-      rmm::device_uvector<char> string_pool(total_string_pool_size, stream);
+      string_pool.emplace(total_string_pool_size, stream);
 
       // offsets describes where in the string pool each string goes. Going with the simple
       // approach for now, but it is possible something fancier with breaking up each thread into
       // copying x bytes instead of a single string is the better method since we are dealing in
       // min/max strings they almost certainly will not be uniform length.
       copy_string_data<<<num_chunks * 2, 256, 0, stream.get()>>>(
-        string_pool.data(),
+        string_pool->data(),
         offsets.data(),
         intermediate_stats.stripe_stat_chunks.data(),
         intermediate_stats.stripe_stat_merge.device_ptr());
       CUDF_CUDA_TRY(cudaGetLastError());
-      string_pools.emplace_back(std::move(string_pool));
     }
   }
 
+  col_types = std::move(intermediate_stats.col_types);
+  num_rows += num_table_rows;
+  if (num_table_rows == 0) { return; }
+  stats_dtypes = std::move(intermediate_stats.stats_dtypes);
+
+  if (string_pool.has_value()) { string_pools.emplace_back(std::move(*string_pool)); }
   stripe_stat_chunks.emplace_back(std::move(intermediate_stats.stripe_stat_chunks));
   stripe_stat_merge.emplace_back(std::move(intermediate_stats.stripe_stat_merge));
 }
@@ -2713,13 +2719,22 @@ writer::impl::impl(std::unique_ptr<data_sink> sink,
                "Compression type not supported for ORC writer");
 }
 
-writer::impl::~impl() { close(); }
+writer::impl::~impl()
+{
+  // Must not throw
+  try {
+    close();
+  } catch (std::exception const& e) {
+    CUDF_LOG_WARN(std::string{"ORC writer failed to close during destruction: "} + e.what());
+  }
+}
 
 void writer::impl::write(table_view const& input)
 {
   CUDF_EXPECTS(_state != writer_state::CLOSED, "Data has already been flushed to out and closed");
-  CUDF_EXPECTS(_state != writer_state::FAILED,
-               "Previous write failed after output may have been written; abandon this writer");
+  CUDF_EXPECTS(
+    _state != writer_state::FAILED,
+    "Writer failed after output started; the output is incomplete and must be discarded");
 
   if (not _table_meta) { _table_meta = make_table_meta(input); }
 
@@ -2755,8 +2770,15 @@ void writer::impl::write(table_view const& input)
                               *_out_sink,
                               _stream);
 
-  auto const first_write = _state == writer_state::NO_DATA_WRITTEN;
-  // Assume failure until all output and state updates succeed.
+  auto const first_write    = _state == writer_state::NO_DATA_WRITTEN;
+  auto const rowgroup_blobs = std::move(intermediate_stats.rowgroup_blobs);
+
+  // Everything that may run out of memory happens before output starts, so failures up to here
+  // are retryable.
+  _persisted_stripe_statistics.persist(
+    orc_table.num_rows(), _single_write_mode, std::move(intermediate_stats), _stream);
+
+  // Output may be partially written from here on.
   _state = writer_state::FAILED;
 
   if (first_write) {
@@ -2771,7 +2793,7 @@ void writer::impl::write(table_view const& input)
                          compressed_data,
                          comp_results,
                          strm_descs,
-                         intermediate_stats.rowgroup_blobs,
+                         rowgroup_blobs,
                          streams,
                          stripes,
                          bounce_buffer);
@@ -2779,23 +2801,11 @@ void writer::impl::write(table_view const& input)
   // Update data into the footer. This needs to be called even when num_rows==0.
   add_table_to_footer_data(orc_table, stripes);
 
-  // Update file-level and compression statistics
-  update_statistics(orc_table.num_rows(), std::move(intermediate_stats), compression_stats);
-
-  _state = writer_state::DATA_WRITTEN;
-}
-
-void writer::impl::update_statistics(
-  size_type num_rows,
-  intermediate_statistics&& intermediate_stats,
-  std::optional<writer_compression_statistics> const& compression_stats)
-{
-  _persisted_stripe_statistics.persist(
-    num_rows, _single_write_mode, std::move(intermediate_stats), _stream);
-
   if (compression_stats.has_value() and _compression_statistics != nullptr) {
     *_compression_statistics += compression_stats.value();
   }
+
+  _state = writer_state::DATA_WRITTEN;
 }
 
 void writer::impl::write_orc_data_to_sink(encoded_data const& enc_data,
@@ -2953,14 +2963,16 @@ void writer::impl::close()
     return;
   }
 
-  // A failed close must not be retried by the destructor with partially updated metadata.
+  std::optional<encoded_footer_statistics> statistics;
+  if (_stats_freq != statistics_freq::STATISTICS_NONE) {
+    statistics = finish_statistic_blobs(_footer, _persisted_stripe_statistics, _stream);
+  }
+
+  // Output may be partially written from here on.
   _state = writer_state::FAILED;
   PostScript ps;
 
-  if (_stats_freq != statistics_freq::STATISTICS_NONE) {
-    // Write column statistics
-    auto statistics = finish_statistic_blobs(_footer, _persisted_stripe_statistics, _stream);
-
+  if (statistics.has_value()) {
     // File-level statistics
     {
       _footer.statistics.reserve(_footer.types.size());
@@ -2976,8 +2988,8 @@ void writer::impl::close()
 
       // Add file stats, stored after stripe stats in `column_stats`
       _footer.statistics.insert(_footer.statistics.end(),
-                                std::make_move_iterator(statistics.file_level.begin()),
-                                std::make_move_iterator(statistics.file_level.end()));
+                                std::make_move_iterator(statistics->file_level.begin()),
+                                std::make_move_iterator(statistics->file_level.end()));
     }
 
     // Stripe-level statistics
@@ -2999,7 +3011,7 @@ void writer::impl::close()
         for (size_t col_idx = 0; col_idx < _footer.types.size() - 1; col_idx++) {
           size_t idx = _footer.stripes.size() * col_idx + stripe_id;
           _orc_meta.stripeStats[stripe_id].colStats[1 + col_idx] =
-            std::move(statistics.stripe_level[idx]);
+            std::move(statistics->stripe_level[idx]);
         }
       }
     }
