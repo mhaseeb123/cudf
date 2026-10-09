@@ -1599,7 +1599,10 @@ class orc_chunked_writer {
    * @brief Writes table to output.
    *
    * @note If an exception is thrown during encoding or compression, the data from the failing call
-   * is not written to the sink. Data from previous successful calls is unaffected.
+   * is not written to the sink. Data from previous successful calls is unaffected, and the call
+   * may be retried. Failures after output starts reject further writes and the output must be
+   * discarded. Calling `close()` or destroying such a failed writer does not finalize or flush the
+   * incomplete output.
    *
    * @param[in] table Table that needs to be written
    * @return returns reference of the class object
@@ -1608,6 +1611,9 @@ class orc_chunked_writer {
 
   /**
    * @brief Finishes the chunked/streamed write process.
+   *
+   * Failed writers do not finalize or flush. A failed close cannot be retried and the output must
+   * be discarded.
    */
   void close();
 

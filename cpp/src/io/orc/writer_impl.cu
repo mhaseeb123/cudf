@@ -2718,6 +2718,8 @@ writer::impl::~impl() { close(); }
 void writer::impl::write(table_view const& input)
 {
   CUDF_EXPECTS(_state != writer_state::CLOSED, "Data has already been flushed to out and closed");
+  CUDF_EXPECTS(_state != writer_state::FAILED,
+               "Previous write failed after output may have been written; abandon this writer");
 
   if (not _table_meta) { _table_meta = make_table_meta(input); }
 
@@ -2753,7 +2755,11 @@ void writer::impl::write(table_view const& input)
                               *_out_sink,
                               _stream);
 
-  if (_state == writer_state::NO_DATA_WRITTEN) {
+  auto const first_write = _state == writer_state::NO_DATA_WRITTEN;
+  // Assume failure until all output and state updates succeed.
+  _state = writer_state::FAILED;
+
+  if (first_write) {
     // Write the ORC file header if this is the first write
     _out_sink->host_write(MAGIC, std::strlen(MAGIC));
   }
@@ -2942,10 +2948,13 @@ void writer::impl::add_table_to_footer_data(orc_table_view const& orc_table,
 void writer::impl::close()
 {
   if (_state != writer_state::DATA_WRITTEN) {
-    // writer is either closed or no data has been written
+    // The writer is closed, empty, or failed. Failed output must not be finalized.
     _state = writer_state::CLOSED;
     return;
   }
+
+  // A failed close must not be retried by the destructor with partially updated metadata.
+  _state = writer_state::FAILED;
   PostScript ps;
 
   if (_stats_freq != statistics_freq::STATISTICS_NONE) {

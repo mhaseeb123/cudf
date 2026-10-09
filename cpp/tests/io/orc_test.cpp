@@ -12,6 +12,7 @@
 #include <cudf_test/cudf_gtest.hpp>
 #include <cudf_test/io_metadata_utilities.hpp>
 #include <cudf_test/iterator_utilities.hpp>
+#include <cudf_test/memory_resource_utilities.hpp>
 #include <cudf_test/random.hpp>
 #include <cudf_test/table_utilities.hpp>
 #include <cudf_test/testing_main.hpp>
@@ -2728,13 +2729,90 @@ TEST_F(OrcChunkedWriterTest, FailedWriteCloseNotThrow)
     cudf::io::chunked_orc_writer_options::builder(cudf::io::sink_info{&sink});
   auto writer = cudf::io::orc_chunked_writer(write_opts);
 
-  try {
-    writer.write(table);
-  } catch (...) {
-    // ignore the exception; we're testing that close() doesn't throw when the only write() fails
-  }
-
+  EXPECT_THROW(writer.write(table), std::runtime_error);
+  EXPECT_THROW(writer.write(table), cudf::logic_error);
   EXPECT_NO_THROW(writer.close());
+}
+
+TEST_F(OrcChunkedWriterTest, OutOfMemoryRetry)
+{
+  // Retain output until flush(), as the JNI sink does for small writes.
+  class buffering_sink : public cudf::io::data_sink {
+   public:
+    void host_write(void const* data, size_t size) override
+    {
+      auto const* bytes = static_cast<char const*>(data);
+      buffer.insert(buffer.end(), bytes, bytes + size);
+    }
+    void flush() override { ++callbacks; }
+    size_t bytes_written() override { return buffer.size(); }
+
+    std::vector<char> buffer;
+    int callbacks{0};
+  };
+
+  int32_col col{1, 2, 3};
+  table_view input{{col}};
+  cuda::mr::any_resource<cuda::mr::device_accessible> upstream{
+    cudf::get_current_device_resource_ref()};
+
+  for (bool late_failure : {false, true}) {
+    for (bool previous_write : {false, true}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "late_failure=" << late_failure << ", previous_write=" << previous_write);
+      buffering_sink sink;
+      bool fail_allocation = false;
+      size_t prior_bytes   = 0;
+      rmm::mr::callback_memory_resource mr{
+        [&, upstream](std::size_t bytes, auto stream, void*) mutable -> void* {
+          // The first GPU allocation after output starts is in statistics persistence.
+          if (fail_allocation && (!late_failure || sink.bytes_written() > prior_bytes)) {
+            throw rmm::bad_alloc{"Injected ORC OOM"};
+          }
+          return upstream.allocate(stream, bytes, cuda::mr::default_cuda_malloc_alignment);
+        },
+        [upstream](void* ptr, std::size_t bytes, auto stream, void*) mutable {
+          upstream.deallocate(stream, ptr, bytes, cuda::mr::default_cuda_malloc_alignment);
+        }};
+      cudf::test::scoped_current_device_resource resource_scope{mr};
+      cudf::io::chunked_orc_writer_options options =
+        cudf::io::chunked_orc_writer_options::builder(cudf::io::sink_info{&sink})
+          .compression(cudf::io::compression_type::NONE)
+          .enable_statistics(cudf::io::statistics_freq::STATISTICS_ROWGROUP);
+      cudf::io::orc_chunked_writer writer{options};
+      if (previous_write) { writer.write(input); }
+      prior_bytes     = sink.bytes_written();
+      fail_allocation = true;
+
+      EXPECT_THROW(writer.write(input), rmm::bad_alloc);
+      EXPECT_EQ(sink.callbacks, 0);
+      fail_allocation = false;
+
+      if (late_failure) {
+        EXPECT_GT(sink.bytes_written(), prior_bytes);
+        auto const failed_bytes = sink.bytes_written();
+        EXPECT_THROW(writer.write(input), cudf::logic_error);
+        EXPECT_EQ(sink.bytes_written(), failed_bytes);
+        EXPECT_NO_THROW(writer.close());
+        EXPECT_NO_THROW(writer.close());
+        EXPECT_EQ(sink.bytes_written(), failed_bytes);
+        EXPECT_EQ(sink.callbacks, 0);
+      } else {
+        EXPECT_EQ(sink.bytes_written(), prior_bytes);
+        EXPECT_NO_THROW(writer.write(input));
+        EXPECT_NO_THROW(writer.close());
+
+        cudf::io::source_info source{
+          cudf::host_span<char const>{sink.buffer.data(), sink.buffer.size()}};
+        auto result   = cudf::io::read_orc(cudf::io::orc_reader_options::builder(source));
+        auto expected = cudf::concatenate(previous_write ? std::vector<table_view>{input, input}
+                                                         : std::vector<table_view>{input});
+        CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expected->view(), result.tbl->view());
+        auto const stats = cudf::io::read_parsed_orc_statistics(source);
+        EXPECT_EQ(stats.file_stats.front().number_of_values, previous_write ? 6 : 3);
+      }
+    }
+  }
 }
 
 TEST_F(OrcChunkedWriterTest, NoDataInSinkWhenNoWrite)
