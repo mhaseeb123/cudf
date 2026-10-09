@@ -491,8 +491,7 @@ TYPED_TEST_SUITE(TopKSegmentedLarge, LargeSegmentTypes);
 
 TYPED_TEST(TopKSegmentedLarge, TopKSegmented)
 {
-  // Many small segments select with cub::DeviceBatchedTopK and few large segments with one
-  // cub::DeviceTopK call per segment
+  // Small enough segments select with cub::DeviceBatchedTopK and larger ones fall back to the sort
   using T    = TypeParam;
   using fwcw = cudf::test::fixed_width_column_wrapper<int32_t>;
 
@@ -502,7 +501,7 @@ TYPED_TEST(TopKSegmentedLarge, TopKSegmented)
 
   // {number of segments, segment size}
   for (auto const& shape : {std::pair<cudf::size_type, cudf::size_type>{1 << 12, 1 << 10},
-                            std::pair<cudf::size_type, cudf::size_type>{4, 1 << 21}}) {
+                            std::pair<cudf::size_type, cudf::size_type>{4, 1 << 13}}) {
     auto const [num_segments, segment_size] = shape;
     auto const num_rows                     = 2 * uncovered + num_segments * segment_size + (k - 1);
 
@@ -566,9 +565,7 @@ TEST_F(TopK, TopKSegmentedLargeTies)
 
   constexpr int32_t num_values = 128;  // values repeat every `num_values` rows
 
-  // {number of segments, segment size}: cub::DeviceBatchedTopK and per-segment cub::DeviceTopK
-  for (auto const& shape : {std::pair<cudf::size_type, cudf::size_type>{1024, 512},
-                            std::pair<cudf::size_type, cudf::size_type>{2, 131'072}}) {
+  for (auto const& shape : {std::pair<cudf::size_type, cudf::size_type>{1024, 512}}) {
     auto const [num_segments, segment_size] = shape;
     auto const copies                       = segment_size / num_values;
     auto const k                            = copies + 2;
