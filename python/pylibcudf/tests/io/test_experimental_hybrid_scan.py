@@ -6,8 +6,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from utils import (
-    assert_table_and_meta_eq,
     BLOOM_FILTER_OPTIONS,
+    assert_table_and_meta_eq,
     extract_parquet_footer,
     requires_pyarrow_bloom_filters,
     synchronize_stream,
