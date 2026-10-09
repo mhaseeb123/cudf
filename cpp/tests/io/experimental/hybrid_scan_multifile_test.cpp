@@ -571,9 +571,11 @@ TEST_F(HybridScanMultifileTest, MismatchedSchemaNullabilityDoesNotLeakIntoMetada
 
 TEST_F(HybridScanMultifileTest, ReadColumnsFromMismatchedSchemas)
 {
+  using T = cudf::timestamp_ms;
+
   // Create two sources with mismatched schemas
-  auto const buffer_a = std::get<1>(create_parquet_with_stats<int64_t, 1>());
-  auto const buffer_b = std::get<1>(create_parquet_with_stats<int64_t, 1>(
+  auto const buffer_a = std::get<1>(create_parquet_with_stats<T, 1>());
+  auto const buffer_b = std::get<1>(create_parquet_with_stats<T, 1>(
     100, cudf::io::compression_type::AUTO, {"col2", "col0", "col1"}, {2, 0, 1}));
 
   auto const parquet_buffers = std::vector<std::vector<char>>{buffer_a, buffer_b};
@@ -581,6 +583,9 @@ TEST_F(HybridScanMultifileTest, ReadColumnsFromMismatchedSchemas)
   auto inputs                = multifile_inputs(source_info);
   auto const stream          = cudf::get_default_stream();
   auto const mr              = cudf::get_current_device_resource_ref();
+
+  // Read ms timestamps as us so that page statistics need scaling in every source
+  auto const timestamp_type = cudf::data_type{cudf::type_id::TIMESTAMP_MICROSECONDS};
 
   // Reading mismatched schemas must be opted into, even without a column projection
   EXPECT_THROW(cudf::io::parquet::experimental::hybrid_scan_multifile(
@@ -592,12 +597,15 @@ TEST_F(HybridScanMultifileTest, ReadColumnsFromMismatchedSchemas)
     cudf::io::read_parquet(cudf::io::parquet_reader_options::builder(source_info)
                              .allow_mismatched_pq_schemas(true)
                              .column_names({"col0", "col1", "col2"})
+                             .timestamp_type(timestamp_type)
                              .build(),
                            stream,
                            mr);
 
-  auto options =
-    cudf::io::parquet_reader_options::builder().allow_mismatched_pq_schemas(true).build();
+  auto options = cudf::io::parquet_reader_options::builder()
+                   .allow_mismatched_pq_schemas(true)
+                   .timestamp_type(timestamp_type)
+                   .build();
   auto reader =
     cudf::io::parquet::experimental::hybrid_scan_multifile{inputs.footer_byte_spans, options};
   auto const row_groups = reader.all_row_groups(options);
@@ -613,10 +621,11 @@ TEST_F(HybridScanMultifileTest, ReadColumnsFromMismatchedSchemas)
 
   // Two step materialize with hybrid scan, pruning pages with per-source mapped page indexes
   {
-    auto literal_value = cudf::numeric_scalar<int64_t>(-50);
-    auto literal       = cudf::ast::literal(literal_value);
-    auto col_ref       = cudf::ast::column_name_reference("col0");
-    auto filter        = cudf::ast::operation(cudf::ast::ast_operator::LESS, col_ref, literal);
+    auto literal_value = cudf::timestamp_scalar<cudf::timestamp_us>(
+      cudf::timestamp_us{cudf::duration_us{4'900'000}}, true);
+    auto literal = cudf::ast::literal(literal_value);
+    auto col_ref = cudf::ast::column_name_reference("col0");
+    auto filter  = cudf::ast::operation(cudf::ast::ast_operator::LESS, col_ref, literal);
 
     options.set_filter(filter);
     reader.reset_column_selection();
@@ -625,6 +634,7 @@ TEST_F(HybridScanMultifileTest, ReadColumnsFromMismatchedSchemas)
       cudf::io::read_parquet(cudf::io::parquet_reader_options::builder(source_info)
                                .allow_mismatched_pq_schemas(true)
                                .column_names({"col0", "col1", "col2"})
+                               .timestamp_type(timestamp_type)
                                .filter(filter)
                                .build(),
                              stream,
@@ -634,8 +644,8 @@ TEST_F(HybridScanMultifileTest, ReadColumnsFromMismatchedSchemas)
     auto row_mask = reader.build_row_mask_with_page_index_stats(row_groups, options, stream, mr);
     auto row_mask_view = row_mask->mutable_view();
 
-    // `col0` is ascending in [-100, 99], so only the first 5 of the 20 pages in each source can
-    // satisfy `col0 < -50`
+    // `col0` is 0..19999 ms (read as us), so only the first 5 of the 20 pages in each source can
+    // satisfy `col0 < 4900 ms`
     EXPECT_EQ(std::ranges::count(cudf::test::to_host<bool>(row_mask->view()).first, true),
               2 * page_size_for_ordered_tests);
 
