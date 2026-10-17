@@ -181,9 +181,7 @@ std::vector<cudf::size_type> hybrid_scan_reader::filter_row_groups_with_bloom_fi
 }
 
 std::unique_ptr<cudf::column> hybrid_scan_reader::build_all_true_row_mask(
-  std::span<size_type const> row_group_indices,
-  cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  std::span<size_type const> row_group_indices, cuda::stream_ref stream, cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
 
@@ -198,7 +196,7 @@ std::unique_ptr<cudf::column> hybrid_scan_reader::build_row_mask_with_page_index
   std::span<size_type const> row_group_indices,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
 
@@ -236,7 +234,7 @@ table_with_metadata hybrid_scan_reader::materialize_table(
   use_data_page_mask mask_data_pages,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
 
@@ -255,7 +253,7 @@ table_with_metadata hybrid_scan_reader::materialize_filter_columns(
   use_data_page_mask mask_data_pages,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   return materialize_table<read_columns_mode::FILTER_COLUMNS>(
     row_group_indices, column_chunk_data, row_mask, mask_data_pages, options, stream, mr);
@@ -274,7 +272,7 @@ table_with_metadata hybrid_scan_reader::materialize_payload_columns(
   use_data_page_mask mask_data_pages,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   return materialize_table<read_columns_mode::PAYLOAD_COLUMNS>(
     row_group_indices, column_chunk_data, row_mask, mask_data_pages, options, stream, mr);
@@ -291,7 +289,7 @@ table_with_metadata hybrid_scan_reader::materialize_all_columns(
   std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   return materialize_table<read_columns_mode::ALL_COLUMNS>(
     row_group_indices, column_chunk_data, {}, use_data_page_mask::NO, options, stream, mr);
@@ -307,7 +305,7 @@ void hybrid_scan_reader::setup_chunked_table_materialization(
   use_data_page_mask mask_data_pages,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   CUDF_FUNC_RANGE();
 
@@ -335,7 +333,7 @@ void hybrid_scan_reader::setup_chunking_for_filter_columns(
   std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   setup_chunked_table_materialization<read_columns_mode::FILTER_COLUMNS>(chunk_read_limit,
                                                                          pass_read_limit,
@@ -372,7 +370,7 @@ void hybrid_scan_reader::setup_chunking_for_payload_columns(
   std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   setup_chunked_table_materialization<read_columns_mode::PAYLOAD_COLUMNS>(chunk_read_limit,
                                                                           pass_read_limit,
@@ -398,7 +396,7 @@ void hybrid_scan_reader::setup_chunking_for_all_columns(
   std::span<cudf::device_span<uint8_t const> const> column_chunk_data,
   parquet_reader_options const& options,
   cuda::stream_ref stream,
-  rmm::device_async_resource_ref mr)
+  cudf::memory_resources mr)
 {
   setup_chunked_table_materialization<read_columns_mode::ALL_COLUMNS>(chunk_read_limit,
                                                                       pass_read_limit,
@@ -447,7 +445,7 @@ bool hybrid_scan_reader::has_next_table_chunk() { return _impl->has_next_table_c
     use_data_page_mask,                                                                      \
     parquet_reader_options const&,                                                           \
     cuda::stream_ref,                                                                        \
-    rmm::device_async_resource_ref);                                                         \
+    cudf::memory_resources);                                                                 \
   template void hybrid_scan_reader::setup_chunked_table_materialization<mode>(               \
     std::size_t,                                                                             \
     std::size_t,                                                                             \
@@ -457,7 +455,7 @@ bool hybrid_scan_reader::has_next_table_chunk() { return _impl->has_next_table_c
     use_data_page_mask,                                                                      \
     parquet_reader_options const&,                                                           \
     cuda::stream_ref,                                                                        \
-    rmm::device_async_resource_ref);                                                         \
+    cudf::memory_resources);                                                                 \
   template table_with_metadata hybrid_scan_reader::materialize_table_chunk<mode>(            \
     row_mask_view_t<mode> const&);
 

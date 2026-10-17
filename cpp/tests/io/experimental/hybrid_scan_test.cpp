@@ -1302,8 +1302,9 @@ TEST_F(HybridScanTest, AllRowsPrunedReportsInputRowGroups)
       mr);
   payload_tasks.get();
 
+  // Default stream and memory resources
   auto const payload_result = reader->materialize_table<read_columns_mode::PAYLOAD_COLUMNS>(
-    row_groups, payload_data, row_mask_view, use_data_page_mask::YES, options, stream, mr);
+    row_groups, payload_data, row_mask_view, use_data_page_mask::YES, options);
   EXPECT_EQ(payload_result.tbl->num_rows(), 0);
   EXPECT_EQ(payload_result.metadata.num_input_row_groups,
             static_cast<cudf::size_type>(row_groups.size()));
