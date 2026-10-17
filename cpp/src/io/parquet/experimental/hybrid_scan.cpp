@@ -13,6 +13,20 @@
 
 namespace cudf::io::parquet::experimental {
 
+namespace {
+
+/**
+ * @brief Moves a `FileMetaData` into a one-element vector as an initializer list would copy it
+ */
+[[nodiscard]] std::vector<FileMetaData> make_metadata_vector(FileMetaData&& parquet_metadata)
+{
+  auto parquet_metadatas = std::vector<FileMetaData>{};
+  parquet_metadatas.push_back(std::move(parquet_metadata));
+  return parquet_metadatas;
+}
+
+}  // namespace
+
 hybrid_scan_metadata::hybrid_scan_metadata(cudf::host_span<uint8_t const> footer_bytes,
                                            parquet_reader_options const& options)
   : _metadata{std::make_shared<detail::aggregate_reader_metadata>(
@@ -31,6 +45,15 @@ hybrid_scan_metadata::hybrid_scan_metadata(FileMetaData const& parquet_metadata,
 {
 }
 
+hybrid_scan_metadata::hybrid_scan_metadata(FileMetaData&& parquet_metadata,
+                                           parquet_reader_options const& options)
+  : _metadata{std::make_shared<detail::aggregate_reader_metadata>(
+      make_metadata_vector(std::move(parquet_metadata)),
+      options.is_enabled_use_arrow_schema(),
+      options.is_enabled_allow_mismatched_pq_schemas())}
+{
+}
+
 hybrid_scan_metadata::~hybrid_scan_metadata() = default;
 
 hybrid_scan_reader::hybrid_scan_reader(cudf::host_span<uint8_t const> footer_bytes,
@@ -44,6 +67,13 @@ hybrid_scan_reader::hybrid_scan_reader(FileMetaData const& parquet_metadata,
                                        parquet_reader_options const& options)
   : _impl{std::make_unique<detail::hybrid_scan_reader_impl>(
       std::vector<FileMetaData>{parquet_metadata}, options)}
+{
+}
+
+hybrid_scan_reader::hybrid_scan_reader(FileMetaData&& parquet_metadata,
+                                       parquet_reader_options const& options)
+  : _impl{std::make_unique<detail::hybrid_scan_reader_impl>(
+      make_metadata_vector(std::move(parquet_metadata)), options)}
 {
 }
 
