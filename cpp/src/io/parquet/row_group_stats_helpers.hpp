@@ -49,7 +49,7 @@ struct row_group_stats_caster : public stats_caster_base {
 
   size_type total_row_groups;
   std::vector<metadata> const& per_file_metadata;
-  host_span<std::vector<size_type> const> row_group_indices;
+  std::span<std::vector<size_type> const> row_group_indices;
   bool with_null_and_nan_stats;
 
   template <typename T>
