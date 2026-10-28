@@ -456,12 +456,16 @@ class stats_expression_converter final : public parquet_expression_simplifier {
                                                            ast::expression const& stats_expr);
 
   /**
-   * @brief Returns `(not_all_null AND (is_nan(literal) OR has_nan)) OR stats_expr` for a
-   * floating-point column, so that a predicate a `NaN` satisfies keeps a chunk that may hold one,
-   * and `stats_expr` otherwise
+   * @brief Wraps `stats_expr` so that a chunk that may hold a `NaN` is never pruned
    *
-   * The min and max exclude `NaN`s, so they cannot answer such a predicate on their own. The
-   * statistics' NaN count tells whether a chunk holds any.
+   * Min/max statistics exclude `NaN`s, but a `NaN` satisfies `col != x` and `NOT(col < x)`.
+   * For a floating-point column, this function wraps the input `stats_expr` as
+   * `(not_all_null AND (literal != literal OR has_nan)) OR stats_expr` such that:
+   * - `literal != literal` is true only for a `NaN` literal
+   * - `has_nan` comes from the NaN count: true if > 0, false if 0, null if unknown (keeps)
+   * - an all-null chunk holds no `NaN`, so it can still be pruned
+   *
+   * Returns `stats_expr` unchanged for other column types.
    *
    * @param col_index Index of the column in the input table
    * @param literal_ref Literal the column is compared against
