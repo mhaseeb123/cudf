@@ -459,11 +459,12 @@ class stats_expression_converter final : public parquet_expression_simplifier {
    * @brief Wraps `stats_expr` so that a chunk that may hold a `NaN` is never pruned
    *
    * Min/max statistics exclude `NaN`s, but a `NaN` satisfies `col != x` and `NOT(col < x)`.
-   * For a floating-point column, this function wraps the input `stats_expr` as
-   * `(not_all_null AND (literal != literal OR has_nan)) OR stats_expr` such that:
+   * For a floating-point column, this function wraps `stats_expr` as
+   * `(not_all_null AND (literal != literal OR has_nan)) OR stats_expr`, where:
    * - `literal != literal` is true only for a `NaN` literal
-   * - `has_nan` comes from the NaN count: true if > 0, false if 0, null if unknown (keeps)
-   * - an all-null chunk holds no `NaN`, so it can still be pruned
+   * - `has_nan` is true if the NaN count is > 0, false if 0, and null if absent, which keeps
+   *   the chunk
+   * - `not_all_null` still prunes an all-null chunk, which holds no `NaN`
    *
    * Returns `stats_expr` unchanged for other column types.
    *
