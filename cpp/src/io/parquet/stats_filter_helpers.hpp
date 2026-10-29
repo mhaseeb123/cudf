@@ -29,6 +29,7 @@
 
 #include <bit>
 #include <cmath>
+#include <concepts>
 #include <numeric>
 #include <span>
 #include <string_view>
@@ -261,7 +262,7 @@ class stats_caster_base {
      * @param nan_count Optional NaN count from the statistics or the column index
      */
     void inline set_has_nan(size_type index, std::optional<int64_t> nan_count)
-      requires(std::is_same_v<T, bool>)
+      requires std::same_as<T, bool>
     {
       if (nan_count.has_value() and nan_count.value() >= 0) {
         val[index] = nan_count.value() > 0;
