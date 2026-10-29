@@ -31,7 +31,8 @@ hybrid_scan_multifile::hybrid_scan_multifile(cudf::host_span<FileMetaData const>
 
 hybrid_scan_multifile::hybrid_scan_multifile(std::vector<FileMetaData>&& parquet_metadata,
                                              parquet_reader_options const& options)
-  : _impl{std::make_unique<hybrid_scan::detail::hybrid_scan_reader_impl>(std::move(parquet_metadata), options)}
+  : _impl{std::make_unique<hybrid_scan::detail::hybrid_scan_reader_impl>(
+      std::move(parquet_metadata), options)}
 {
 }
 
@@ -264,7 +265,7 @@ void hybrid_scan_multifile::setup_chunking_for_payload_columns(
                                                                                  mr);
 }
 
-void hybrid_scan_multifile::setup_chunking_for_payload_columns(
+void hybrid_scan_multifile::setup_chunking_for_payload_pages(
   std::size_t chunk_read_limit,
   std::size_t pass_read_limit,
   cudf::host_span<std::vector<size_type> const> row_group_indices,
