@@ -461,22 +461,37 @@ class stats_expression_converter final : public parquet_expression_simplifier {
    *
    * Min/max statistics exclude `NaN`s, but a `NaN` satisfies `col != x` and `NOT(col < x)`.
    * For a floating-point column, this function wraps `stats_expr` as
-   * `(not_all_null AND (literal != literal OR has_nan)) OR stats_expr`, where:
+   * `(literal != literal OR has_nan) OR stats_expr`, where:
    * - `literal != literal` is true only for a `NaN` literal
    * - `has_nan` is true if the NaN count is > 0, false if 0, and null if absent, which keeps
    *   the chunk
-   * - `not_all_null` still prunes an all-null chunk, which holds no `NaN`
    *
-   * Returns `stats_expr` unchanged for other column types.
+   * Returns `stats_expr` unchanged for other column types. An all-null chunk holds no `NaN`, so
+   * the caller's non-null guard around the result still prunes it.
    *
    * @param col_index Index of the column in the input table
-   * @param literal_ref Literal the column is compared against
+   * @param literal Literal the column is compared against, already pushed onto the tree
    * @param stats_expr Statistics expression to guard, already pushed onto the tree
    * @return The guarded statistics expression
    */
   [[nodiscard]] ast::expression const& push_nan_guard(size_type col_index,
-                                                      ast::literal const& literal_ref,
+                                                      ast::expression const& literal,
                                                       ast::expression const& stats_expr);
+
+  /**
+   * @brief Converts a prunable comparison to its statistics expression, with the `NaN` guard if
+   * a `NaN` satisfies the comparison and the non-null guard around it
+   *
+   * @param op Prunable comparison operator
+   * @param col_index Index of the column in the input table
+   * @param literal_ref Literal the column is compared against
+   * @param nan_satisfies Whether a `NaN` value or literal satisfies the comparison
+   * @return The guarded statistics expression
+   */
+  [[nodiscard]] ast::expression const& push_comparison(ast::ast_operator op,
+                                                       size_type col_index,
+                                                       ast::literal const& literal_ref,
+                                                       bool nan_satisfies);
 
   simplified_expression_opt _stats_expr;
 };

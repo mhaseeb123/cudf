@@ -450,12 +450,21 @@ TEST_F(HybridScanTest, FilterFloatsWithNanCounts)
 
   // Patches the NaN counts of the first column into the metadata, with `nan_count` NaNs in the
   // first row group and its first page, and none elsewhere. std::nullopt leaves them absent. The
-  // first row group and page are also made constant at their minimum so that `!=` can prune them
-  auto const prune = [&](cudf::ast::operation const& filter, std::optional<int64_t> nan_count) {
-    auto patched                                 = metadata;
-    auto& first_chunk                            = patched.row_groups.front().columns.front();
-    first_chunk.meta_data.statistics.max_value   = first_chunk.meta_data.statistics.min_value;
-    first_chunk.column_index->max_values.front() = first_chunk.column_index->min_values.front();
+  // first row group and page are also made constant at their minimum so that `!=` can prune them,
+  // or entirely null if `first_all_null` is set
+  auto const prune = [&](cudf::ast::operation const& filter,
+                         std::optional<int64_t> nan_count,
+                         bool first_all_null = false) {
+    auto patched      = metadata;
+    auto& first_chunk = patched.row_groups.front().columns.front();
+    if (first_all_null) {
+      first_chunk.meta_data.statistics             = {};
+      first_chunk.meta_data.statistics.null_count  = first_chunk.meta_data.num_values;
+      first_chunk.column_index->null_pages.front() = true;
+    } else {
+      first_chunk.meta_data.statistics.max_value   = first_chunk.meta_data.statistics.min_value;
+      first_chunk.column_index->max_values.front() = first_chunk.column_index->min_values.front();
+    }
     if (nan_count.has_value()) {
       for (auto& row_group : patched.row_groups) {
         auto const is_first                  = &row_group == &patched.row_groups.front();
@@ -489,8 +498,10 @@ TEST_F(HybridScanTest, FilterFloatsWithNanCounts)
   // Known NaN-free chunks and pages are pruned by their statistics
   EXPECT_EQ(prune(not_col0_lt_1, 0),
             std::pair(row_groups_type{2, 3}, int64_t{num_ordered_rows / 2}));
-  // The row group and page holding a NaN are kept
+  // The row group and page holding a NaN are kept, as are those with an invalid negative count
   EXPECT_EQ(prune(not_col0_lt_1, 1),
+            std::pair(row_groups_type{0, 2, 3}, int64_t{num_ordered_rows / 2 + rows_per_page}));
+  EXPECT_EQ(prune(not_col0_lt_1, -1),
             std::pair(row_groups_type{0, 2, 3}, int64_t{num_ordered_rows / 2 + rows_per_page}));
   // A NaN literal keeps every row group and page even when they are NaN-free
   EXPECT_EQ(prune(not_col0_lt_nan, 0),
@@ -502,6 +513,13 @@ TEST_F(HybridScanTest, FilterFloatsWithNanCounts)
             std::pair(row_groups_type{1, 2, 3}, int64_t{num_ordered_rows - rows_per_page}));
   EXPECT_EQ(prune(col0_ne_min, 1),
             std::pair(row_groups_type{0, 1, 2, 3}, int64_t{num_ordered_rows}));
+  EXPECT_EQ(prune(col0_ne_min, -1),
+            std::pair(row_groups_type{0, 1, 2, 3}, int64_t{num_ordered_rows}));
+  // An all-null row group and page hold no NaN, so they are pruned even with unknown NaN counts
+  EXPECT_EQ(prune(col0_ne_min, std::nullopt, true),
+            std::pair(row_groups_type{1, 2, 3}, int64_t{num_ordered_rows - rows_per_page}));
+  EXPECT_EQ(prune(not_col0_lt_1, std::nullopt, true),
+            std::pair(row_groups_type{1, 2, 3}, int64_t{num_ordered_rows - rows_per_page}));
 }
 
 TEST_F(HybridScanTest, MaterializeStrings)
