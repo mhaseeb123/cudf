@@ -26,6 +26,7 @@
 #include <cub/warp/warp_reduce.cuh>
 #include <cuda/cmath>
 #include <cuda/iterator>
+#include <cuda/std/algorithm>
 #include <cuda/std/chrono>
 #include <cuda/std/functional>
 #include <cuda/std/iterator>
@@ -34,7 +35,6 @@
 #include <cuda/std/utility>
 #include <cuda/stream>
 #include <thrust/binary_search.h>
-#include <thrust/logical.h>
 
 #include <bitset>
 
@@ -3391,14 +3391,11 @@ CUDF_KERNEL void __launch_bounds__(1)
 
   // nan_counts. Omitted if a page holds only NaNs, as min/max can't be written for such a page
   if (col_g.stats_dtype == dtype_float32 or col_g.stats_dtype == dtype_float64) {
-    auto const page_stats = column_stats.begin() + pageidx;
-    auto const has_all_nan_page =
-      thrust::any_of(thrust::seq,
-                     page_stats + first_data_page,
-                     page_stats + num_pages,
-                     [] __device__(statistics_chunk const& stats) {
-                       return stats.nan_count > 0 and stats.nan_count == stats.non_nulls;
-                     });
+    auto const page_stats       = column_stats.begin() + pageidx;
+    auto const has_all_nan_page = cuda::std::any_of(
+      page_stats + first_data_page, page_stats + num_pages, [](statistics_chunk const& stats) {
+        return stats.nan_count > 0 and stats.nan_count == stats.non_nulls;
+      });
     if (not has_all_nan_page) {
       encoder.field_list_begin(8, num_data_pages, FieldType::I64);
       for (uint32_t page = first_data_page; page < num_pages; page++) {
