@@ -479,14 +479,19 @@ class stats_expression_converter final : public parquet_expression_simplifier {
                                                       ast::expression const& stats_expr);
 
   /**
-   * @brief Converts a prunable comparison to its statistics expression, with the `NaN` guard if
-   * a `NaN` satisfies the comparison and the non-null guard around it
+   * @brief Converts a prunable comparison to its statistics expression
+   *
+   * Returns `not_all_null AND (nan_matches OR stats_expr)`, where `nan_matches` is only included
+   * if `nan_satisfies` is true. For example:
+   * - `col < 5`      --> `stats_expr = vmin < 5`
+   * - `col != 5`     --> `stats_expr = vmin != vmax OR vmax != 5`, with `nan_matches`
+   * - `NOT(col < 5)` --> `stats_expr = vmax >= 5` (`op` is `>=`), with `nan_matches`
    *
    * @param op Prunable comparison operator
-   * @param col_index Index of the column in the input table
-   * @param literal_ref Literal the column is compared against
+   * @param col_index Input table column index
+   * @param literal_ref Reference to the literal
    * @param nan_satisfies Whether a `NaN` value or literal satisfies the comparison
-   * @return The guarded statistics expression
+   * @return Converted statistics expression
    */
   [[nodiscard]] ast::expression const& push_comparison(ast::ast_operator op,
                                                        size_type col_index,
