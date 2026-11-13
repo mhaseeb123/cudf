@@ -12,11 +12,14 @@
 #include <cudf/column/column.hpp>
 #include <cudf/io/datasource.hpp>
 #include <cudf/io/parquet_schema.hpp>
+#include <cudf/io/types.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/table/table_view.hpp>
 #include <cudf/utilities/concepts.hpp>
 #include <cudf/utilities/span.hpp>
 
+#include <functional>
+#include <memory>
 #include <random>
 #include <string>
 #include <string_view>
@@ -45,6 +48,20 @@ extern cudf::test::TempDirTestEnvironment* const temp_env;
                                                   std::string_view const filename,
                                                   std::vector<std::string> column_names = {},
                                                   std::vector<int> field_ids            = {});
+
+/**
+ * @brief Checks reading decimal columns at every `decimal_width` with the given reader
+ *
+ * Writes decimal32, decimal64 and decimal128 columns with identical values, including negatives
+ * and nulls, with each of the PLAIN, DICTIONARY, DELTA_BINARY_PACKED and BYTE_STREAM_SPLIT
+ * encodings. All values fit in decimal32, so every read is expected to match `cudf::cast` of the
+ * written columns.
+ *
+ * @param read Reads the Parquet buffer with `decimal_width` set to the given type
+ */
+void test_decimal_width_reads(
+  std::function<std::unique_ptr<cudf::table>(cudf::host_span<char const>, cudf::type_id)> const&
+    read);
 
 // TODO: Replace with `NumericTypes` when unsigned support is added. Issue #5352
 using SupportedTypes = cudf::test::Types<int8_t, int16_t, int32_t, int64_t, bool, float, double>;

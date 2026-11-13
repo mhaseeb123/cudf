@@ -5,6 +5,7 @@
 
 #include "parquet_common.hpp"
 
+#include <cudf_test/column_utilities.hpp>
 #include <cudf_test/iterator_utilities.hpp>
 
 #include <cudf/concatenate.hpp>
@@ -12,15 +13,20 @@
 #include <cudf/io/parquet.hpp>
 #include <cudf/io/parquet_io_utils.hpp>
 #include <cudf/io/parquet_metadata.hpp>
+#include <cudf/unary.hpp>
 #include <cudf/utilities/concepts.hpp>
 #include <cudf/utilities/error.hpp>
+#include <cudf/utilities/type_dispatcher.hpp>
 
 #include <cuda/std/type_traits>
 
 #include <src/io/parquet/compact_protocol_reader.hpp>
 
+#include <algorithm>
+#include <array>
 #include <format>
 #include <numeric>
+#include <ranges>
 #include <string>
 
 // Global environment for temporary files
@@ -46,6 +52,64 @@ std::string write_parquet_temp_file(cudf::table_view const& tbl,
       .metadata(std::move(md));
   cudf::io::write_parquet(opts);
   return path;
+}
+
+void test_decimal_width_reads(
+  std::function<std::unique_ptr<cudf::table>(cudf::host_span<char const>, cudf::type_id)> const&
+    read)
+{
+  using cudf::io::column_encoding;
+
+  // Repeated values keep the dictionary small enough to be used
+  auto constexpr num_rows = 100;
+  auto constexpr pattern =
+    std::array<int32_t, 7>{-999'999'999, -123'456, -1, 0, 1, 654'321, 999'999'999};
+  auto values = std::vector<int32_t>(num_rows);
+  std::ranges::transform(std::views::iota(0, num_rows), values.begin(), [&](auto i) {
+    return pattern[i % pattern.size()];
+  });
+
+  auto const scale = numeric::scale_type{-2};
+  auto const dec32 = cudf::test::fixed_point_column_wrapper<int32_t>(
+    values.begin(), values.end(), cudf::test::iterators::nulls_at({3, 10, 50, 99}), scale);
+  auto columns = std::vector<std::unique_ptr<cudf::column>>{};
+  for (auto const type_id :
+       {cudf::type_id::DECIMAL32, cudf::type_id::DECIMAL64, cudf::type_id::DECIMAL128}) {
+    columns.push_back(cudf::cast(dec32, cudf::data_type{type_id, scale}));
+  }
+  auto const source = cudf::table{std::move(columns)};
+
+  for (auto const encoding : {column_encoding::PLAIN,
+                              column_encoding::DICTIONARY,
+                              column_encoding::DELTA_BINARY_PACKED,
+                              column_encoding::BYTE_STREAM_SPLIT}) {
+    // decimal128 is written as FIXED_LEN_BYTE_ARRAY, which DELTA_BINARY_PACKED does not support
+    cudf::io::table_input_metadata metadata{source.view()};
+    for (auto i = 0; i < source.num_columns(); ++i) {
+      if (encoding != column_encoding::DELTA_BINARY_PACKED or
+          source.view().column(i).type().id() != cudf::type_id::DECIMAL128) {
+        metadata.column_metadata[i].set_encoding(encoding);
+      }
+    }
+    auto buffer = std::vector<char>{};
+    cudf::io::write_parquet(
+      cudf::io::parquet_writer_options::builder(cudf::io::sink_info{&buffer}, source.view())
+        .metadata(std::move(metadata))
+        .build());
+
+    for (auto const target :
+         {cudf::type_id::DECIMAL32, cudf::type_id::DECIMAL64, cudf::type_id::DECIMAL128}) {
+      SCOPED_TRACE(std::format("encoding {}, decimal_width {}",
+                               static_cast<int>(encoding),
+                               cudf::type_to_name(cudf::data_type{target})));
+      auto const result = read(buffer, target);
+      ASSERT_EQ(result->num_columns(), source.num_columns());
+      for (auto i = 0; i < source.num_columns(); ++i) {
+        auto const expected = cudf::cast(source.view().column(i), cudf::data_type{target, scale});
+        CUDF_TEST_EXPECT_COLUMNS_EQUAL(*expected, result->view().column(i));
+      }
+    }
+  }
 }
 
 template <typename T, typename Elements>
