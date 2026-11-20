@@ -783,11 +783,11 @@ metadata::~metadata()
   }
 }
 
-std::vector<metadata> aggregate_reader_metadata::metadatas_from_sources(
+std::vector<std::shared_ptr<metadata>> aggregate_reader_metadata::metadatas_from_sources(
   std::span<std::unique_ptr<datasource> const> sources, bool read_page_indexes)
 {
   return parallel_construct_metadatas(sources, [read_page_indexes](auto const& source) {
-    return metadata{source.get(), read_page_indexes};
+    return std::make_shared<metadata>(source.get(), read_page_indexes);
   });
 }
 
@@ -797,8 +797,8 @@ aggregate_reader_metadata::collect_keyval_metadata() const
   std::vector<std::unordered_map<std::string, std::string>> kv_maps;
   std::ranges::transform(per_file_metadata, std::back_inserter(kv_maps), [](auto const& pfm) {
     std::unordered_map<std::string, std::string> kv_map;
-    std::transform(pfm.key_value_metadata.cbegin(),
-                   pfm.key_value_metadata.cend(),
+    std::transform(pfm->key_value_metadata.cbegin(),
+                   pfm->key_value_metadata.cend(),
                    std::inserter(kv_map, kv_map.end()),
                    [](auto const& kv) { return std::pair{kv.key, kv.value.value_or("")}; });
     return kv_map;
@@ -823,12 +823,12 @@ int64_t aggregate_reader_metadata::calc_num_rows() const
   return std::accumulate(
     per_file_metadata.cbegin(), per_file_metadata.cend(), int64_t{0}, [](auto sum, auto& pfm) {
       auto const rowgroup_rows = std::accumulate(
-        pfm.row_groups.cbegin(), pfm.row_groups.cend(), int64_t{0}, [](auto rg_sum, auto& rg) {
+        pfm->row_groups.cbegin(), pfm->row_groups.cend(), int64_t{0}, [](auto rg_sum, auto& rg) {
           return rg_sum + rg.num_rows;
         });
-      CUDF_EXPECTS(pfm.num_rows == 0 || pfm.num_rows == rowgroup_rows,
+      CUDF_EXPECTS(pfm->num_rows == 0 || pfm->num_rows == rowgroup_rows,
                    "Header and row groups disagree about number of rows in file!");
-      return sum + (pfm.num_rows == 0 && rowgroup_rows > 0 ? rowgroup_rows : pfm.num_rows);
+      return sum + (pfm->num_rows == 0 && rowgroup_rows > 0 ? rowgroup_rows : pfm->num_rows);
     });
 }
 
@@ -836,7 +836,7 @@ size_type aggregate_reader_metadata::calc_num_row_groups() const
 {
   auto const total_row_groups = std::accumulate(
     per_file_metadata.cbegin(), per_file_metadata.cend(), size_t{0}, [](size_t sum, auto& pfm) {
-      return sum + pfm.row_groups.size();
+      return sum + pfm->row_groups.size();
     });
 
   // Check if we have less than 2B total row groups.
@@ -850,7 +850,7 @@ std::vector<size_type> aggregate_reader_metadata::get_num_row_groups_per_file() 
 {
   std::vector<size_type> per_file_num_row_groups(per_file_metadata.size());
   std::ranges::transform(per_file_metadata, per_file_num_row_groups.begin(), [](auto const& pfm) {
-    return pfm.row_groups.size();
+    return pfm->row_groups.size();
   });
   return per_file_num_row_groups;
 }
@@ -860,7 +860,7 @@ std::vector<size_t> aggregate_reader_metadata::compute_source_row_group_offsets(
 {
   CUDF_EXPECTS(src_idx >= 0 && std::cmp_less(src_idx, per_file_metadata.size()),
                "invalid source index");
-  auto const& row_groups = per_file_metadata[src_idx].row_groups;
+  auto const& row_groups = per_file_metadata[src_idx]->row_groups;
   std::vector<size_t> source_row_offsets(row_groups.size());
   std::transform_exclusive_scan(row_groups.cbegin(),
                                 row_groups.cend(),
@@ -875,7 +875,7 @@ std::vector<size_t> aggregate_reader_metadata::compute_source_row_group_offsets(
 void aggregate_reader_metadata::column_info_for_row_group(row_group_info& rg_info,
                                                           size_t chunk_start_row) const
 {
-  auto const& fmd = per_file_metadata[rg_info.source_index];
+  auto const& fmd = *per_file_metadata[rg_info.source_index];
   auto const& rg  = fmd.row_groups[rg_info.index];
 
   std::vector<column_chunk_info> chunks(rg.columns.size());
@@ -1011,7 +1011,7 @@ bool aggregate_reader_metadata::has_offset_index(
   std::span<input_column_info const> input_columns) const
 {
   for (auto const& rg_info : row_groups) {
-    auto const& row_group = per_file_metadata[rg_info.source_index].row_groups[rg_info.index];
+    auto const& row_group = per_file_metadata[rg_info.source_index]->row_groups[rg_info.index];
     for (auto const& input_column : input_columns) {
       auto const schema_idx      = map_schema_index(input_column.schema_idx, rg_info.source_index);
       auto const colchunk_offset = find_colchunk_iter_offset(row_group, schema_idx);
@@ -1023,7 +1023,7 @@ bool aggregate_reader_metadata::has_offset_index(
 
 void aggregate_reader_metadata::propagate_optional_field(int schema_idx, SchemaElement const& src)
 {
-  if (per_file_metadata.front().schema[schema_idx].repetition_type ==
+  if (per_file_metadata.front()->schema[schema_idx].repetition_type ==
         FieldRepetitionType::REQUIRED and
       src.repetition_type != FieldRepetitionType::REQUIRED) {
     nullable_across_sources.insert(schema_idx);
@@ -1034,13 +1034,13 @@ void aggregate_reader_metadata::initialize_internals(bool use_arrow_schema,
                                                      bool has_cols_from_mismatched_srcs)
 {
   if (per_file_metadata.size() > 1) {
-    auto& first_meta                      = per_file_metadata.front();
+    auto const& first_meta                = *per_file_metadata.front();
     auto const first_nonempty_source_iter = std::ranges::find_if(
-      per_file_metadata, [&](auto const& pfm) { return pfm.row_groups.size() > 0; });
+      per_file_metadata, [&](auto const& pfm) { return pfm->row_groups.size() > 0; });
     auto const num_cols = first_nonempty_source_iter != per_file_metadata.end()
-                            ? first_nonempty_source_iter->row_groups.front().columns.size()
+                            ? (*first_nonempty_source_iter)->row_groups.front().columns.size()
                             : 0;
-    auto& schema        = first_meta.schema;
+    auto const& schema  = first_meta.schema;
 
     // Validate that all sources have the same schema unless we are reading select columns
     // from mismatched sources, in which case, we will only check the projected columns later.
@@ -1060,11 +1060,12 @@ void aggregate_reader_metadata::initialize_internals(bool use_arrow_schema,
 
       // Verify that the input files have matching numbers of columns and schema.
       for (auto const& pfm : per_file_metadata) {
-        if (pfm.row_groups.size() > 0) {
-          CUDF_EXPECTS(pfm.row_groups.empty() or num_cols == pfm.row_groups.front().columns.size(),
-                       "All non-empty sources must have the same number of columns");
+        if (pfm->row_groups.size() > 0) {
+          CUDF_EXPECTS(
+            pfm->row_groups.empty() or num_cols == pfm->row_groups.front().columns.size(),
+            "All non-empty sources must have the same number of columns");
         }
-        CUDF_EXPECTS(schema == pfm.schema and same_file_groups(pfm.schema),
+        CUDF_EXPECTS(schema == pfm->schema and same_file_groups(pfm->schema),
                      "All sources must have the same schema");
       }
 
@@ -1075,7 +1076,7 @@ void aggregate_reader_metadata::initialize_internals(bool use_arrow_schema,
         [&](auto const schema_idx) {
           std::for_each(
             per_file_metadata.begin() + 1, per_file_metadata.end(), [&](auto const& pfm) {
-              propagate_optional_field(static_cast<int>(schema_idx), pfm.schema[schema_idx]);
+              propagate_optional_field(static_cast<int>(schema_idx), pfm->schema[schema_idx]);
             });
         });
     }
@@ -1091,16 +1092,29 @@ void aggregate_reader_metadata::initialize_internals(bool use_arrow_schema,
 aggregate_reader_metadata::aggregate_reader_metadata(std::vector<FileMetaData>&& parquet_metadatas,
                                                      bool use_arrow_schema,
                                                      bool has_cols_from_mismatched_srcs)
+  : aggregate_reader_metadata(
+      [&] {
+        std::vector<std::shared_ptr<metadata>> metadatas;
+        metadatas.reserve(parquet_metadatas.size());
+        std::ranges::transform(parquet_metadatas, std::back_inserter(metadatas), [](auto& meta) {
+          return std::make_shared<metadata>(std::move(meta));
+        });
+        return metadatas;
+      }(),
+      use_arrow_schema,
+      has_cols_from_mismatched_srcs)
 {
-  CUDF_EXPECTS(not parquet_metadatas.empty(),
+}
+
+aggregate_reader_metadata::aggregate_reader_metadata(
+  std::vector<std::shared_ptr<metadata>>&& parquet_metadatas,
+  bool use_arrow_schema,
+  bool has_cols_from_mismatched_srcs)
+  : per_file_metadata(std::move(parquet_metadatas))
+{
+  CUDF_EXPECTS(not per_file_metadata.empty(),
                "Cannot construct aggregate Parquet reader metadata without source metadata",
                std::invalid_argument);
-
-  per_file_metadata.reserve(parquet_metadatas.size());
-  std::transform(std::make_move_iterator(parquet_metadatas.begin()),
-                 std::make_move_iterator(parquet_metadatas.end()),
-                 std::back_inserter(per_file_metadata),
-                 [](FileMetaData&& meta) { return metadata{std::move(meta)}; });
 
   keyval_maps     = collect_keyval_metadata();
   schema_idx_maps = init_schema_idx_maps(has_cols_from_mismatched_srcs);
@@ -1278,7 +1292,7 @@ void aggregate_reader_metadata::collect_arrow_types()
   // Function to verify equal num_children at each level in Parquet and arrow schemas.
   std::function<bool(arrow_schema_data_types const&, int const)> validate_schemas =
     [&](arrow_schema_data_types const& arrow_schema, int const schema_idx) {
-      auto const& pq_schema_elem = per_file_metadata[0].schema[schema_idx];
+      auto const& pq_schema_elem = per_file_metadata[0]->schema[schema_idx];
 
       // ensure equal number of children first to avoid any segfaults in children
       if (std::cmp_equal(pq_schema_elem.num_children, arrow_schema.children.size())) {
@@ -1299,7 +1313,7 @@ void aggregate_reader_metadata::collect_arrow_types()
   // Function to co-walk arrow and parquet schemas
   std::function<void(arrow_schema_data_types const&, int const)> co_walk_schemas =
     [&](arrow_schema_data_types const& arrow_schema, int const schema_idx) {
-      auto const& pq_schema_elem = per_file_metadata[0].schema[schema_idx];
+      auto const& pq_schema_elem = per_file_metadata[0]->schema[schema_idx];
       std::for_each(cuda::make_zip_iterator(cuda::std::make_tuple(
                       arrow_schema.children.begin(), pq_schema_elem.children_idx.begin())),
                     cuda::make_zip_iterator(cuda::std::make_tuple(
@@ -1421,7 +1435,7 @@ RowGroup const& aggregate_reader_metadata::get_row_group(size_type row_group_ind
 {
   CUDF_EXPECTS(src_idx >= 0 && std::cmp_less(src_idx, per_file_metadata.size()),
                "invalid source index");
-  return per_file_metadata[src_idx].row_groups[row_group_index];
+  return per_file_metadata[src_idx]->row_groups[row_group_index];
 }
 
 row_group_size_info aggregate_reader_metadata::get_row_group_size_info(
@@ -1474,7 +1488,7 @@ ColumnChunkMetaData const& aggregate_reader_metadata::get_column_metadata(size_t
   // Map schema index to the provided source file index
   schema_idx = map_schema_index(schema_idx, src_idx);
 
-  auto const& row_group      = per_file_metadata[src_idx].row_groups[row_group_index];
+  auto const& row_group      = per_file_metadata[src_idx]->row_groups[row_group_index];
   auto const colchunk_offset = find_colchunk_iter_offset(row_group, schema_idx);
   return row_group.columns[colchunk_offset].meta_data;
 }
@@ -1485,8 +1499,8 @@ aggregate_reader_metadata::get_rowgroup_metadata() const
   std::vector<std::unordered_map<std::string, int64_t>> rg_metadata;
 
   std::ranges::for_each(per_file_metadata, [&rg_metadata](auto const& pfm) {
-    std::transform(pfm.row_groups.cbegin(),
-                   pfm.row_groups.cend(),
+    std::transform(pfm->row_groups.cbegin(),
+                   pfm->row_groups.cend(),
                    std::back_inserter(rg_metadata),
                    [](auto const& rg) {
                      std::unordered_map<std::string, int64_t> rg_meta_map;
@@ -1525,7 +1539,7 @@ aggregate_reader_metadata::get_column_chunk_metadata() const
       std::for_each(cuda::counting_iterator<size_t>{0},
                     cuda::counting_iterator{per_file_metadata.size()},
                     [&](auto const& src_idx) {
-                      auto const& file_metadata = per_file_metadata[src_idx];
+                      auto const& file_metadata = *per_file_metadata[src_idx];
                       // For each row group in this source
                       std::transform(cuda::counting_iterator<size_t>{0},
                                      cuda::counting_iterator{file_metadata.row_groups.size()},
@@ -1745,7 +1759,7 @@ aggregate_reader_metadata::apply_row_bounds_filter(
     cuda::counting_iterator<size_t>{0},
     cuda::counting_iterator{num_sources},
     [&](auto const& src_idx) {
-      auto const& file_metadata = per_file_metadata[src_idx];
+      auto const& file_metadata = *per_file_metadata[src_idx];
       auto const num_row_groups = input_row_group_indices[src_idx].size();
 
       // Fill row group rows counts and row offsets with zeros
@@ -1811,7 +1825,7 @@ std::vector<std::vector<size_type>> aggregate_reader_metadata::apply_byte_bounds
                 [&](auto const& rg_idx) {
                   // Get the file offset of this row group
                   auto const row_group_file_offset = [&]() {
-                    auto const& rg = per_file_metadata.front().row_groups[rg_idx];
+                    auto const& rg = per_file_metadata.front()->row_groups[rg_idx];
                     if (rg.file_offset.has_value()) {
                       return rg.file_offset.value();
                     } else if (rg.columns.front().file_offset != 0) {
@@ -1905,7 +1919,7 @@ aggregate_reader_metadata::select_row_groups(
     all_row_group_indices.reserve(per_file_metadata.size());
     std::ranges::transform(
       per_file_metadata, std::back_inserter(all_row_group_indices), [](auto const& file_meta) {
-        std::vector<size_type> rg_idx(file_meta.row_groups.size());
+        std::vector<size_type> rg_idx(file_meta->row_groups.size());
         std::iota(rg_idx.begin(), rg_idx.end(), 0);
         return rg_idx;
       });
@@ -2032,7 +2046,7 @@ aggregate_reader_metadata::select_row_groups(
     cuda::counting_iterator<size_t>{0},
     cuda::counting_iterator{current_row_group_indices.size()},
     [&](auto const& src_idx) {
-      auto const& file_metadata = per_file_metadata[src_idx];
+      auto const& file_metadata = *per_file_metadata[src_idx];
 
       // File-local row group row offsets
       auto const source_row_offsets =
