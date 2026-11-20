@@ -23,9 +23,15 @@ from pylibcudf.libcudf.column.column cimport column
 from pylibcudf.libcudf.column.column_view cimport column_view, mutable_column_view
 from pylibcudf.libcudf.io.hybrid_scan cimport (
     const_device_span_const_uint8_t,
+    const_hybrid_scan_metadata_ptr,
     const_size_type,
+    const_std_span_const_uint8_t,
     const_uint8_t,
     hybrid_scan_metadata as cpp_hybrid_scan_metadata,
+    hybrid_scan_metadata_combine,
+    hybrid_scan_metadata_select,
+    hybrid_scan_metadata_slice,
+    std_span_const_uint8_t,
     hybrid_scan_reader as cpp_hybrid_scan_reader,
     read_columns_mode as cpp_read_columns_mode,
     use_data_page_mask as cpp_use_data_page_mask,
@@ -71,6 +77,18 @@ cdef device_span[const_uint8_t] _get_device_span(object obj) except *:
                                       <size_t>obj.size)
 
 
+cdef vector[std_span_const_uint8_t] _byte_spans(list buffers) except *:
+    """Spans over ``buffers``, which must outlive their use."""
+    cdef vector[std_span_const_uint8_t] spans
+    cdef const uint8_t[::1] buf
+    for buf in buffers:
+        if len(buf) == 0:
+            spans.push_back(std_span[const_uint8_t](<const uint8_t*>0, 0))
+        else:
+            spans.push_back(std_span[const_uint8_t](&buf[0], len(buf)))
+    return spans
+
+
 cdef class HybridScanMetadata:
     """Shareable, pre-parsed Parquet file metadata for the hybrid scan reader.
 
@@ -93,7 +111,7 @@ cdef class HybridScanMetadata:
     def __init__(self):
         raise ValueError(
             "HybridScanMetadata cannot be constructed directly. "
-            "Use from_footer_bytes() or from_parquet_metadata()."
+            "Use from_footer_bytes(), from_footers() or from_parquet_metadata()."
         )
 
     @staticmethod
@@ -137,6 +155,114 @@ cdef class HybridScanMetadata:
         with nogil:
             copy = dereference(metadata.c_obj)
             result.c_obj = make_unique[cpp_hybrid_scan_metadata](move(copy))
+        return result
+
+    @staticmethod
+    def from_footers(object footer_bytes: Sequence[Buffer]):
+        """Parse shareable metadata of several files from their footer bytes.
+
+        Parameters
+        ----------
+        footer_bytes : Sequence[Buffer]
+            Parquet file footer bytes, one per source
+
+        Returns
+        -------
+        HybridScanMetadata
+        """
+        cdef HybridScanMetadata result = HybridScanMetadata.__new__(HybridScanMetadata)
+        footer_bytes = list(footer_bytes)
+        cdef vector[std_span_const_uint8_t] spans = _byte_spans(footer_bytes)
+        with nogil:
+            result.c_obj = make_unique[cpp_hybrid_scan_metadata](
+                std_span[const_std_span_const_uint8_t](
+                    <const_std_span_const_uint8_t*>spans.data(), spans.size()
+                )
+            )
+        return result
+
+    @staticmethod
+    def combine(object metadatas: Sequence[HybridScanMetadata]):
+        """Combine the sources of several handles, in order, sharing their metadata.
+
+        Parameters
+        ----------
+        metadatas : Sequence[HybridScanMetadata]
+            Handles to combine
+
+        Returns
+        -------
+        HybridScanMetadata
+        """
+        cdef HybridScanMetadata result = HybridScanMetadata.__new__(HybridScanMetadata)
+        cdef vector[const_hybrid_scan_metadata_ptr] handles
+        cdef HybridScanMetadata metadata
+        for metadata in metadatas:
+            handles.push_back(metadata.c_obj.get())
+        with nogil:
+            result.c_obj = hybrid_scan_metadata_combine(handles)
+        return result
+
+    def num_sources(self) -> int:
+        """Get the number of sources (files)."""
+        return self.c_obj.get()[0].num_sources()
+
+    def page_index_byte_ranges(self) -> list[ByteRangeInfo]:
+        """Get the byte range of the page index of all sources.
+
+        Returns
+        -------
+        list[ByteRangeInfo]
+            Byte range of the page index per source; empty once set up
+        """
+        cdef vector[byte_range_info] ranges
+        with nogil:
+            ranges = move(self.c_obj.get()[0].page_index_byte_ranges())
+        return [ByteRangeInfo(r.offset(), r.size()) for r in ranges]
+
+    def setup_page_indexes(self, object page_index_bytes: Sequence[Buffer]) -> None:
+        """Set up the page index of all sources in place.
+
+        Visible to every handle and reader sharing a source. Not thread safe:
+        set up a source's page index before it is used concurrently.
+
+        Parameters
+        ----------
+        page_index_bytes : Sequence[Buffer]
+            Page index bytes, one per source; empty buffers are skipped
+        """
+        page_index_bytes = list(page_index_bytes)
+        cdef vector[std_span_const_uint8_t] spans = _byte_spans(page_index_bytes)
+        with nogil:
+            self.c_obj.get()[0].setup_page_indexes(
+                std_span[const_std_span_const_uint8_t](
+                    <const_std_span_const_uint8_t*>spans.data(), spans.size()
+                )
+            )
+
+    def slice(self, size_t begin, size_t end) -> HybridScanMetadata:
+        """Share the contiguous range of sources ``[begin, end)``.
+
+        Returns
+        -------
+        HybridScanMetadata
+        """
+        cdef HybridScanMetadata result = HybridScanMetadata.__new__(HybridScanMetadata)
+        with nogil:
+            result.c_obj = hybrid_scan_metadata_slice(self.c_obj.get()[0], begin, end)
+        return result
+
+    def select(self, object source_indices: Sequence[int]) -> HybridScanMetadata:
+        """Share the given sources, in the given order.
+
+        Returns
+        -------
+        HybridScanMetadata
+        """
+        cdef HybridScanMetadata result = HybridScanMetadata.__new__(HybridScanMetadata)
+        cdef vector[size_t] indices = source_indices
+        with nogil:
+            result.c_obj = hybrid_scan_metadata_select(self.c_obj.get()[0], indices)
         return result
 
 

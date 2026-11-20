@@ -15,7 +15,10 @@ from rmm.pylibrmm.memory_resource cimport DeviceMemoryResource
 from rmm.pylibrmm.stream cimport Stream
 
 from pylibcudf.column cimport Column
-from pylibcudf.io.experimental.hybrid_scan cimport _get_device_span
+from pylibcudf.io.experimental.hybrid_scan cimport (
+    HybridScanMetadata,
+    _get_device_span,
+)
 from pylibcudf.io.parquet cimport ParquetReaderOptions
 from pylibcudf.io.parquet_metadata cimport FileMetaData as c_FileMetaData
 from pylibcudf.io.text cimport ByteRangeInfo
@@ -156,6 +159,35 @@ cdef class HybridScanMultiFile:
                     <const_FileMetaData*>metadatas.data(), metadatas.size()
                 ),
                 options.c_obj
+            )
+        return reader
+
+    @staticmethod
+    def from_metadata(
+        HybridScanMetadata metadata not None, ParquetReaderOptions options
+    ) -> HybridScanMultiFile:
+        """Create a HybridScanMultiFile that shares pre-parsed metadata.
+
+        The reader shares the per-file metadata of ``metadata`` instead of
+        copying it, and validates it with ``options``.
+
+        Parameters
+        ----------
+        metadata : HybridScanMetadata
+            Shared metadata of all sources to read
+        options : ParquetReaderOptions
+            Parquet reader options
+
+        Returns
+        -------
+        HybridScanMultiFile
+        """
+        cdef HybridScanMultiFile reader = HybridScanMultiFile.__new__(
+            HybridScanMultiFile
+        )
+        with nogil:
+            reader.c_obj = make_unique[cpp_hybrid_scan_multifile](
+                metadata.c_obj.get()[0], options.c_obj
             )
         return reader
 

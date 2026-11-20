@@ -12,6 +12,7 @@ from pylibcudf.libcudf.column.column_view cimport column_view
 from pylibcudf.libcudf.io.hybrid_scan cimport (
     const_device_span_const_uint8_t,
     const_uint8_t,
+    hybrid_scan_metadata,
     read_columns_mode,
 )
 from pylibcudf.libcudf.io.parquet cimport parquet_reader_options
@@ -34,6 +35,11 @@ cdef extern from "cudf/io/experimental/hybrid_scan_multifile.hpp" \
     cdef cppclass hybrid_scan_multifile:
         hybrid_scan_multifile(
             host_span[const_FileMetaData] parquet_metadata,
+            const parquet_reader_options& options
+        ) except +libcudf_exception_handler
+
+        hybrid_scan_multifile(
+            hybrid_scan_metadata metadata,
             const parquet_reader_options& options
         ) except +libcudf_exception_handler
 

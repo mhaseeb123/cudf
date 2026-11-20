@@ -22,6 +22,7 @@ from pylibcudf.expressions import (
     Operation,
 )
 from pylibcudf.io.experimental import (
+    HybridScanMetadata,
     HybridScanMultiFile,
     ReadColumnsMode,
     RowGroupIndices,
@@ -186,6 +187,41 @@ def test_hybrid_scan_multifile_metadata(
         byte_range.size > 0
         for byte_range in hybrid_scan_multifile_reader_without_page_index.page_index_byte_ranges()
     )
+
+
+def test_hybrid_scan_multifile_from_shared_metadata(
+    parquet_bytes: list[bytes],
+    parquet_options: plc.io.parquet.ParquetReaderOptions,
+    num_rows: int,
+) -> None:
+    """Test readers built from combined, sliced and selected shared metadata."""
+    footers = [footer_bytes(source) for source in parquet_bytes]
+    metadata = HybridScanMetadata.combine(
+        [
+            HybridScanMetadata.from_footers(footers),
+            HybridScanMetadata.from_footer_bytes(footers[0]),
+        ]
+    )
+    assert metadata.num_sources() == 3
+    assert metadata.slice(1, 3).num_sources() == 2
+    selected = metadata.select([2, 0])
+    assert selected.num_sources() == 2
+
+    # Page index setup on one handle is visible to all handles sharing a source
+    sources = [*parquet_bytes, parquet_bytes[0]]
+    metadata.setup_page_indexes(
+        [
+            memoryview(source)[r.offset : r.offset + r.size]
+            for source, r in zip(
+                sources, metadata.page_index_byte_ranges(), strict=True
+            )
+        ]
+    )
+    assert all(r.size == 0 for r in selected.page_index_byte_ranges())
+
+    reader = HybridScanMultiFile.from_metadata(selected, parquet_options)
+    assert [m.num_rows for m in reader.parquet_metadatas()] == [num_rows] * 2
+    assert all(r.size == 0 for r in reader.page_index_byte_ranges())
 
 
 def test_hybrid_scan_multifile_construct_row_group_passes(

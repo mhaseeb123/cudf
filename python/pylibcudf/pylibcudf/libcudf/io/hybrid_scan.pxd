@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from libc.stddef cimport size_t
 from libc.stdint cimport uint8_t
 from libcpp cimport bool
 from libcpp.memory cimport shared_ptr, unique_ptr
@@ -22,6 +23,8 @@ from rmm.librmm.memory_resource cimport device_async_resource_ref
 ctypedef const uint8_t const_uint8_t
 ctypedef const size_type const_size_type
 ctypedef const device_span[const_uint8_t] const_device_span_const_uint8_t
+ctypedef std_span[const_uint8_t] std_span_const_uint8_t
+ctypedef const std_span_const_uint8_t const_std_span_const_uint8_t
 
 cdef extern from "cudf/io/experimental/hybrid_scan.hpp" \
         namespace "cudf::io::parquet::experimental" nogil:
@@ -40,9 +43,22 @@ cdef extern from "cudf/io/experimental/hybrid_scan.hpp" \
             std_span[const_uint8_t] footer_bytes
         ) except +libcudf_exception_handler
 
+        hybrid_scan_metadata(
+            std_span[const_std_span_const_uint8_t] footer_bytes
+        ) except +libcudf_exception_handler
+
         # Takes `FileMetaData&&`: pass `move(...)`
         hybrid_scan_metadata(
             FileMetaData parquet_metadata
+        ) except +libcudf_exception_handler
+
+        size_t num_sources() except +libcudf_exception_handler
+
+        vector[byte_range_info] page_index_byte_ranges() \
+            except +libcudf_exception_handler
+
+        void setup_page_indexes(
+            std_span[const_std_span_const_uint8_t] page_index_bytes
         ) except +libcudf_exception_handler
 
     cdef cppclass hybrid_scan_reader:
@@ -224,3 +240,51 @@ cdef extern from "cudf/io/experimental/hybrid_scan.hpp" \
         ) except +libcudf_exception_handler
 
         bool has_next_table_chunk() except +libcudf_exception_handler
+
+
+ctypedef const hybrid_scan_metadata* const_hybrid_scan_metadata_ptr
+
+
+cdef extern from * namespace "pylibcudf" nogil:
+    """
+    #include <cudf/io/experimental/hybrid_scan.hpp>
+    #include <memory>
+    #include <vector>
+
+    namespace pylibcudf {
+    using cudf::io::parquet::experimental::hybrid_scan_metadata;
+
+    inline auto hybrid_scan_metadata_combine(
+      std::vector<hybrid_scan_metadata const*> const& metadatas)
+    {
+      std::vector<hybrid_scan_metadata> handles;
+      handles.reserve(metadatas.size());
+      for (auto const* metadata : metadatas) { handles.push_back(*metadata); }
+      return std::make_unique<hybrid_scan_metadata>(
+        std::span<hybrid_scan_metadata const>{handles});
+    }
+
+    inline auto hybrid_scan_metadata_slice(
+      hybrid_scan_metadata const& metadata, std::size_t begin, std::size_t end)
+    {
+      return std::make_unique<hybrid_scan_metadata>(metadata.slice(begin, end));
+    }
+
+    inline auto hybrid_scan_metadata_select(
+      hybrid_scan_metadata const& metadata, std::vector<std::size_t> const& source_indices)
+    {
+      return std::make_unique<hybrid_scan_metadata>(metadata.select(source_indices));
+    }
+    }  // namespace pylibcudf
+    """
+    unique_ptr[hybrid_scan_metadata] hybrid_scan_metadata_combine(
+        const vector[const_hybrid_scan_metadata_ptr]& metadatas
+    ) except +libcudf_exception_handler
+
+    unique_ptr[hybrid_scan_metadata] hybrid_scan_metadata_slice(
+        const hybrid_scan_metadata& metadata, size_t begin, size_t end
+    ) except +libcudf_exception_handler
+
+    unique_ptr[hybrid_scan_metadata] hybrid_scan_metadata_select(
+        const hybrid_scan_metadata& metadata, const vector[size_t]& source_indices
+    ) except +libcudf_exception_handler
